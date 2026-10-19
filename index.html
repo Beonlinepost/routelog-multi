@@ -33,6 +33,9 @@
 @media (min-width:64rem){.lg\:grid-cols-6{grid-template-columns:repeat(6,minmax(0,1fr))}}
 .bg-amber-500{background-color:#f59e0b}.bg-yellow-400{background-color:#facc15}.border-yellow-300{border-color:#fde047}.text-yellow-950{color:#422006}
 .\!py-1{padding-top:.25rem!important;padding-bottom:.25rem!important}.bg-orange-50\/50{background-color:#fff7ed80}
+.bg-emerald-50{background-color:#ecfdf5}.bg-emerald-600{background-color:#059669}.border-emerald-300{border-color:#6ee7b7}
+.col-span-1{grid-column:span 1/span 1}.col-span-3{grid-column:span 3/span 3}.col-span-6{grid-column:span 6/span 6}
+.py-10{padding-top:2.5rem;padding-bottom:2.5rem}.rounded-2xl{border-radius:1rem}.text-primary\/70{color:color-mix(in oklab,var(--primary) 70%,transparent)}
 
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js"></script>
@@ -138,7 +141,7 @@ function fromStop(s) {
     residents: s.residents, aliases: s.aliases, business_name: s.businessName, house_name: s.houseName, house_number: s.houseNumber,
     road: s.road, eircode: s.eircode, search_tags: s.searchTags, has_dog: !!s.hasDog, safe_place: s.safePlace, notes: s.notes, lat: s.lat, lng: s.lng };
 }
-function toSection(r) { return { id: r.id, routeId: r.route_id, position: r.position, name: r.name, boxNumber: r.box_number }; }
+function toSection(r) { return { id: r.id, routeId: r.route_id, position: r.position, name: r.name, boxNumber: r.box_number, vanZone: r.van_zone || null }; }
 
 async function fetchAll(table, filter, order) {
   const out = []; const page = 1000;
@@ -885,8 +888,9 @@ const OFF = {
       while (q.length) {
         const op = q[0]; let res;
         if (op.type === "update") res = await sb.from("stops").update(op.row).eq("id", op.id);
-        else if (op.type === "parcel") res = op.token ? await sb.rpc("log_parcel_public", { p_token: op.token, p_stop_id: op.stopId, p_count: op.count, p_via: op.via })
-                                                      : await sb.rpc("log_parcel", { p_stop_id: op.stopId, p_count: op.count, p_via: op.via });
+        else if (op.type === "parcel") res = await sb.rpc("log_item", { p_stop_id: op.stopId, p_count: op.count, p_via: op.via, p_kind: op.kind || "parcel", p_token: op.token || null });
+        else if (op.type === "mark") res = await sb.rpc("mark_stop", { p_stop_id: op.stopId, p_status: op.status, p_token: op.token || null });
+        else if (op.type === "pin") res = await sb.rpc("pin_stop", { p_stop_id: op.stopId, p_lat: op.lat, p_lng: op.lng, p_token: op.token || null });
         else if (op.type === "unparcel") res = op.token ? await sb.rpc("delete_parcel_public", { p_token: op.token, p_parcel_id: op.parcelId })
                                                         : await sb.from("parcels").delete().eq("id", op.parcelId);
         else if (op.type === "correction") res = op.token ? await sb.rpc("record_correction_public", { p_token: op.token, p_stop_id: op.stopId, p_original: op.original, p_normalized: op.normalized })
@@ -909,36 +913,37 @@ const todayStr = () => new Date().toLocaleDateString("en-CA", { timeZone: "Europ
 async function loadMemberBundle(routeId) {
   const cacheKey = `rl-route-${routeId}`;
   try {
-    const [{ data: route, error: e1 }, secRows, stopRows, canEditRes, parcelRes] = await Promise.all([
+    const [{ data: route, error: e1 }, secRows, stopRows, canEditRes, parcelRes, delRes] = await Promise.all([
       sb.from("routes").select("*").eq("id", routeId).maybeSingle(),
       fetchAll("sections", { route_id: routeId }, ["position", "box_number"]),
       fetchAll("stops", { route_id: routeId }, ["section_id", "stop_order"]),
       sb.rpc("can_edit_route", { p_route: routeId }),
-      sb.from("parcels").select("id,stop_id,count,via,created_at").eq("route_id", routeId).eq("log_date", todayStr())
+      sb.from("parcels").select("id,stop_id,count,via,kind,created_at").eq("route_id", routeId).eq("log_date", todayStr()),
+      sb.from("deliveries").select("stop_id,status").eq("route_id", routeId).eq("log_date", todayStr())
     ]);
     if (e1) throw e1;
     if (!route) return null;
-    const b = { route, sections: secRows, stops: stopRows, canEdit: !!canEditRes?.data, parcels: parcelRes?.data || [], day: todayStr(), savedAt: Date.now() };
+    const b = { route, sections: secRows, stops: stopRows, canEdit: !!canEditRes?.data, parcels: parcelRes?.data || [], deliveries: delRes?.data || [], day: todayStr(), savedAt: Date.now() };
     try { localStorage.setItem(cacheKey, JSON.stringify(b)); lsSet("rl-last-route", String(routeId)); } catch {}
     return b;
   } catch (e) {
     const c = lsGet(cacheKey); if (!c) throw e;
-    const b = JSON.parse(c); b.offline = true; if (b.day !== todayStr()) b.parcels = [];
+    const b = JSON.parse(c); b.offline = true; if (b.day !== todayStr()) { b.parcels = []; b.deliveries = []; }
     return b;
   }
 }
 async function loadShareBundle(token) {
   const cacheKey = `rl-share-${token}`;
   try {
-    const [{ data, error }, p] = await Promise.all([sb.rpc("get_public_summary", { p_token: token }), sb.rpc("parcels_today_public", { p_token: token })]);
+    const [{ data, error }, p, d] = await Promise.all([sb.rpc("get_public_summary", { p_token: token }), sb.rpc("parcels_today_public", { p_token: token }), sb.rpc("deliveries_today_public", { p_token: token })]);
     if (error) throw error;
     if (!data) return null;
-    const b = { route: data.route, sections: data.sections, stops: data.stops, canEdit: false, parcels: p?.data || [], day: todayStr(), savedAt: Date.now() };
+    const b = { route: data.route, sections: data.sections, stops: data.stops, canEdit: false, parcels: p?.data || [], deliveries: d?.data || [], day: todayStr(), savedAt: Date.now() };
     try { localStorage.setItem(cacheKey, JSON.stringify(b)); } catch {}
     return b;
   } catch (e) {
     const c = lsGet(cacheKey); if (!c) throw e;
-    const b = JSON.parse(c); b.offline = true; if (b.day !== todayStr()) b.parcels = [];
+    const b = JSON.parse(c); b.offline = true; if (b.day !== todayStr()) { b.parcels = []; b.deliveries = []; }
     return b;
   }
 }
@@ -988,18 +993,23 @@ function renderRoute(B) {
   const sections = B.sections.map(toSection);
   let all = B.stops.map(toStop);
   const canEdit = !share && B.canEdit && !B.offlineEditsBlocked;
-  let parcels = (B.parcels || []).map(p => ({ id: p.id, stopId: p.stop_id ?? p.stopId, count: p.count }));
+  let parcels = (B.parcels || []).map(p => ({ id: p.id, stopId: p.stop_id ?? p.stopId, count: p.count, kind: p.kind || "parcel" }));
+  const deliv = new Map((B.deliveries || []).map(d => [d.stop_id, d.status]));
   const FT_KEY = "routelog:fieldTestMode";
   const S = {
-    sectionId: sections[0]?.id ?? 0, query: "", mode: "sorting", reorder: false, parcelList: false,
+    sectionId: sections[0]?.id ?? 0, query: "", mode: lsGet("rl-mode-" + routeId) === "van" ? "van" : "sorting", vanAll: false, reorder: false, parcelList: false,
     fieldTest: share || lsGet(FT_KEY) !== "false", voiceErr: null, lastCtx: null, searchStart: null, riPick: null, pendingParcel: null
   };
   const ri = new RouteIntelligence(routeId); ri.token = token; ri.build(all); ri.loadLearned();
   const sectionStops = () => all.filter(s => s.sectionId === S.sectionId).sort((a, b) => a.stopOrder - b.stopOrder);
   const curSection = () => sections.find(x => x.id === S.sectionId);
   const pool = () => (S.mode === "delivery" ? sectionStops() : all);
-  const parcelCount = id => parcels.filter(p => p.stopId === id).reduce((n, p) => n + p.count, 0);
-  const secParcels = sid => parcels.reduce((n, p) => n + (all.find(s => s.id === p.stopId)?.sectionId === sid ? p.count : 0), 0);
+  const onlyParcels = () => parcels.filter(p => p.kind !== "letter");
+  const parcelCount = id => onlyParcels().filter(p => p.stopId === id).reduce((n, p) => n + p.count, 0);
+  const letterCount = id => parcels.filter(p => p.kind === "letter" && p.stopId === id).reduce((n, p) => n + p.count, 0);
+  const secParcels = sid => onlyParcels().reduce((n, p) => n + (all.find(s => s.id === p.stopId)?.sectionId === sid ? p.count : 0), 0);
+  const zoneOf = stop => sections.find(x => x.id === stop.sectionId)?.vanZone || null;
+  const shelfWords = stop => { const z = zoneOf(stop); return z ? (/^(shelf|cage|front|back|left|right|rack)/i.test(z) ? z : `Shelf ${z}`) : ""; };
   const btnIcon = "p-2 rounded-full hover:bg-white/10 transition-colors";
 
   mount(`<div class="min-h-screen bg-background flex flex-col">
@@ -1028,7 +1038,7 @@ function renderRoute(B) {
       </div>
       <div data-reorderhint class="px-3 pb-2.5" style="display:none"><p class="text-xs text-primary-foreground/70 text-center">Drag handles to reorder · tap ⇅ again to exit</p></div>
       <div data-modes class="flex gap-1.5 px-3 pb-2.5">
-        ${["sorting", "delivery", "parcel"].map(m => `<button data-mode="${m}" class="flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all">${m[0].toUpperCase() + m.slice(1)}</button>`).join("")}
+        ${["sorting", "delivery", "parcel", "van"].map(m => `<button data-mode="${m}" class="flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all">${m[0].toUpperCase() + m.slice(1)}</button>`).join("")}
       </div>
       <p data-verr class="text-xs text-red-300 px-3 pb-1" style="display:none"></p>
     </header>
@@ -1110,7 +1120,14 @@ function renderRoute(B) {
     S.query = text; qEl.value = text; S.riPick = null; S.parcelList = false; drawList();
     if (!isFinal) return;
     const t = text.trim(); if (!t) return;
-    S.searchStart = Date.now();
+    S.searchStart = Date.now(); S.lastLetter = null;
+    /* ---- van commands ---- */
+    if (S.mode === "van") {
+      const w = t.toLowerCase().replace(/[.!?]/g, "").trim();
+      if (/^(delivered|done|next|got it|dropped|that's done|thats done|deliver)$/.test(w)) { S.query = ""; qEl.value = ""; const nx = vanNext(); if (nx) { markStop(nx, "delivered"); logSearch(t, "box", "delivered"); } else say("All done.", t, "box"); return; }
+      if (/^(skip|skip it|skip this one|come back|later)$/.test(w)) { S.query = ""; qEl.value = ""; const nx = vanNext(); if (nx) markStop(nx, "skipped"); return; }
+      if (/^(repeat|again|say again|what's next|whats next|next stop|where am i)$/.test(w)) { S.query = ""; qEl.value = ""; drawList(); return say(vanCallout(vanNext()), t, "box"); }
+    }
     if (S.mode === "delivery") {
       const m = t.match(/^box\s+(\d+)$/i);
       if (m) { const n = +m[1], sec = sections.find(x => x.boxNumber === n); if (sec) { selectSection(sec.id); say(`Box ${n} ready. ${sec.name}.`, t, "box"); } else say(`Box ${n} not found.`, t, "no-match"); return; }
@@ -1128,7 +1145,7 @@ function renderRoute(B) {
       S.lastCtx = ctx(pp.name, r.level, r.results);
       if (r.stop && !r.weak) {
         await logParcel(r.stop, pp.count, "voice");
-        say(`${countWord(pp.count)}. ${spokenName(r.stop, matchStop(r.stop, pp.name)) || "Stop " + r.stop.stopOrder}. ${r.stop.road || ""}`.trim(), t, "parcel", r.stop, r.results, !!learned);
+        say(`${countWord(pp.count)}. ${spokenName(r.stop, matchStop(r.stop, pp.name)) || "Stop " + r.stop.stopOrder}. ${zoneOf(r.stop) ? shelfWords(r.stop) : (r.stop.road || "")}`.trim(), t, "parcel", r.stop, r.results, !!learned);
       } else {
         S.pendingParcel = { count: pp.count, until: Date.now() + 20000 };
         drawList();
@@ -1139,10 +1156,11 @@ function renderRoute(B) {
     const r = await resolve(t);
     S.lastCtx = ctx(t, r.level, r.results);
     const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
-    if (r.ri) return say(callout(r.stop, nameFor(r.stop, t)), t, "found", r.stop, r.results, r.learned);
+    if (r.ri) { logLetter(r.stop); return say(callout(r.stop, nameFor(r.stop, t)), t, "found", r.stop, r.results, r.learned); }
     if (!r.results.length) { say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: sectionStops(), onSave: saveName }); return; }
     if (r.level === 1 || r.level === 2) {
       if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
+      logLetter(r.stop);
       return say(callout(r.stop, nameFor(r.stop, t)), t, "found", r.stop, r.results);
     }
     if (S.mode === "delivery") { const s0 = r.results[0]; return say(callout(s0, spokenName(s0, matchStop(s0, t))), t, "found", s0, r.results); }
@@ -1154,24 +1172,128 @@ function renderRoute(B) {
   }
 
   /* ---- parcels ---- */
-  async function logParcel(stop, count = 1, via = "tap") {
-    const tmp = { id: -Date.now(), stopId: stop.id, count };
-    parcels.push(tmp); drawHeader(); drawList();
+  async function logParcel(stop, count = 1, via = "tap", kind = "parcel", silent = false) {
+    const tmp = { id: -Date.now() - Math.random(), stopId: stop.id, count, kind };
+    parcels.push(tmp); if (!silent) { drawHeader(); drawList(); }
     let res;
-    try { res = token ? await sb.rpc("log_parcel_public", { p_token: token, p_stop_id: stop.id, p_count: count, p_via: via })
-                      : await sb.rpc("log_parcel", { p_stop_id: stop.id, p_count: count, p_via: via }); }
+    try { res = await sb.rpc("log_item", { p_stop_id: stop.id, p_count: count, p_via: via, p_kind: kind, p_token: token }); }
     catch (e) { res = { error: e }; }
-    if (res.error && OFF.isNetErr(res.error)) { OFF.push({ type: "parcel", token, stopId: stop.id, count, via }); }
-    else if (res.error) { parcels = parcels.filter(p => p !== tmp); drawHeader(); drawList(); return toast.error("Couldn't log parcel: " + res.error.message); }
+    if (res.error && OFF.isNetErr(res.error)) { OFF.push({ type: "parcel", token, stopId: stop.id, count, via, kind }); tmp.queued = true; }
+    else if (res.error) { parcels = parcels.filter(p => p !== tmp); drawHeader(); drawList(); if (!silent) toast.error("Couldn't log parcel: " + res.error.message); return null; }
     else tmp.id = res.data.id;
-    const name = stop.businessName || splitPipe(stop.residents)[0] || `Stop ${stop.stopOrder}`;
-    toastAction(`📦 ${count} × ${name}`, "Undo", () => undoParcel(tmp));
+    if (!silent) {
+      const name = stop.businessName || splitPipe(stop.residents)[0] || `Stop ${stop.stopOrder}`;
+      toastAction(`📦 ${count} × ${name}${zoneOf(stop) ? " → " + shelfWords(stop) : ""}`, "Undo", () => undoParcel(tmp));
+    }
+    return tmp;
+  }
+  /* every name found in the sorting room = one letter for that house today */
+  function logLetter(stop) {
+    if (S.mode !== "sorting" || !stop) return;
+    const p = logParcel(stop, 1, "voice", "letter", true);
+    S.lastLetter = { promise: p, stopId: stop.id };
+    p.then(() => drawTabs());
+  }
+  async function moveLastLetter(stop) {
+    const L = S.lastLetter; S.lastLetter = null;
+    if (!L || L.stopId === stop.id || S.mode !== "sorting") return;
+    const it = await L.promise; if (it) undoParcel(it);
+    logLetter(stop);
   }
   async function undoParcel(p) {
+    if (!p) return;
     parcels = parcels.filter(x => x !== p); drawHeader(); drawList();
-    if (p.id < 0) { OFF.set(OFF.get().filter(op => !(op.type === "parcel" && op.stopId === p.stopId && op.count === p.count))); return; }
+    if (p.queued || p.id < 0) { OFF.set(OFF.get().filter(op => !(op.type === "parcel" && op.stopId === p.stopId && op.count === p.count && (op.kind || "parcel") === p.kind))); if (p.id < 0) return; }
     const res = token ? await sb.rpc("delete_parcel_public", { p_token: token, p_parcel_id: p.id }) : await sb.from("parcels").delete().eq("id", p.id);
     if (res.error && OFF.isNetErr(res.error)) OFF.push({ type: "unparcel", token, parcelId: p.id });
+  }
+
+  /* ---- van mode ---- */
+  const posOf = id => sections.findIndex(x => x.id === id);
+  function vanRun() {
+    const ids = new Set(parcels.map(p => p.stopId));
+    const list = S.vanAll ? all : all.filter(s => ids.has(s.id));
+    return [...list].sort((a, b) => posOf(a.sectionId) - posOf(b.sectionId) || a.stopOrder - b.stopOrder);
+  }
+  const vanNext = () => vanRun().find(s => !deliv.has(s.id));
+  function vanCallout(st, prefix = "Next stop") {
+    if (!st) return "All done. That's every stop for today.";
+    const n = parcelCount(st.id), l = letterCount(st.id), name = st.businessName || splitPipe(st.residents)[0] || "";
+    const bits = [`${prefix} ${st.stopOrder}, ${name}`];
+    if (n) bits.push(`${countWord(n).toLowerCase()}${zoneOf(st) ? " from " + shelfWords(st) : ""}`);
+    if (l) bits.push(l === 1 ? "one letter" : `${l} letters`);
+    if (st.safePlace) bits.push(`drop off ${st.safePlace}`);
+    if (st.hasDog) bits.push("watch the dog");
+    return bits.join(". ") + ".";
+  }
+  async function markStop(st, status) {
+    if (!st) return;
+    const prev = deliv.get(st.id);
+    if (status) deliv.set(st.id, status); else deliv.delete(st.id);
+    drawList();
+    let res; try { res = await sb.rpc("mark_stop", { p_stop_id: st.id, p_status: status || "undo", p_token: token }); } catch (e) { res = { error: e }; }
+    if (res.error && OFF.isNetErr(res.error)) OFF.push({ type: "mark", token, stopId: st.id, status: status || "undo" });
+    else if (res.error) { if (prev) deliv.set(st.id, prev); else deliv.delete(st.id); drawList(); return toast.error(res.error.message); }
+    if (status) {
+      toastAction(`${status === "delivered" ? "✓ Delivered" : "↷ Skipped"}: ${splitPipe(st.residents)[0] || st.businessName || "Stop " + st.stopOrder}`, "Undo", () => markStop(st, null));
+      speak(vanCallout(vanNext()));
+    }
+  }
+  function directionsUrl(st) {
+    const e = (st.eircode || "").replace(/\s/g, "");
+    const dest = st.lat && st.lng ? `${st.lat},${st.lng}` : e.length === 7 ? e : [st.houseName, st.businessName, st.road, route.name.replace(/ route$/i, ""), "Co. Donegal"].filter(Boolean).join(", ");
+    return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}&travelmode=driving`;
+  }
+  function pinStop(st) {
+    if (!navigator.geolocation) return toast.error("This phone can't share its location");
+    toast.info("Getting your location…");
+    navigator.geolocation.getCurrentPosition(async pos => {
+      const lat = +pos.coords.latitude.toFixed(6), lng = +pos.coords.longitude.toFixed(6);
+      let res; try { res = await sb.rpc("pin_stop", { p_stop_id: st.id, p_lat: lat, p_lng: lng, p_token: token }); } catch (e) { res = { error: e }; }
+      if (res.error && OFF.isNetErr(res.error)) OFF.push({ type: "pin", token, stopId: st.id, lat, lng });
+      else if (res.error) return toast.error(res.error.message);
+      st.lat = lat; st.lng = lng; cacheStops(); drawList();
+      toast.success(`📍 Pinned ${splitPipe(st.residents)[0] || st.businessName || "stop " + st.stopOrder} (±${Math.round(pos.coords.accuracy)} m)`);
+    }, err => toast.error(err.code === 1 ? "Allow location for this site to pin houses" : "Couldn't get your location"), { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  }
+  function drawVan() {
+    const run = vanRun(), next = vanNext(), done = run.filter(s => deliv.get(s.id) === "delivered").length, skipped = run.filter(s => deliv.get(s.id) === "skipped");
+    $("[data-count]").textContent = run.length ? `${done} of ${run.length} delivered${skipped.length ? ` · ${skipped.length} skipped` : ""} · ${S.vanAll ? "whole route" : "today's post only"}` : "";
+    if (!run.length) {
+      listEl.innerHTML = `<div class="text-center py-10 px-4 space-y-3"><p class="text-base font-semibold">Nothing sorted for today yet</p>
+        <p class="text-sm text-muted-foreground">Van mode builds today's run from the sorting room: every name found in <b>Sorting</b> (letters) and every parcel logged in <b>Parcel</b> mode.</p>
+        <button data-vanall class="px-4 py-2 rounded-full bg-primary text-primary-foreground text-sm font-semibold">Use the whole route instead</button></div>`;
+      $("[data-foot]").textContent = ""; return;
+    }
+    const chip = (t, cls) => `<span class="inline-flex items-center px-2.5 py-1 rounded-full text-sm font-bold ${cls}">${t}</span>`;
+    let html = "";
+    if (next) {
+      const n = parcelCount(next.id), l = letterCount(next.id), sec = sections.find(x => x.id === next.sectionId), names = splitPipe(next.residents);
+      html += `<div class="bg-white rounded-2xl border-2 border-primary shadow-lg p-4 space-y-3">
+        <div class="flex items-center justify-between"><span class="text-xs font-bold uppercase tracking-wide text-primary/70">Next stop · Box ${sec?.boxNumber ?? ""} · #${next.stopOrder}</span>${next.eircode ? `<span class="font-mono text-sm font-bold">${esc(next.eircode)}</span>` : ""}</div>
+        <p class="text-2xl font-bold leading-tight">${esc(next.businessName || names[0] || "Stop " + next.stopOrder)}</p>
+        ${names.length > 1 || next.businessName ? `<p class="text-sm text-muted-foreground">${esc((next.businessName ? names : names.slice(1)).join(", "))}</p>` : ""}
+        ${[next.houseName, next.houseNumber, next.road].filter(Boolean).length ? `<p class="text-sm">${esc([next.houseName, next.houseNumber, next.road].filter(Boolean).join(", "))}</p>` : ""}
+        <div class="flex flex-wrap gap-2">${n ? chip(`📦 ${n} parcel${n > 1 ? "s" : ""}${zoneOf(next) ? " · " + esc(shelfWords(next)) : ""}`, "bg-yellow-400 text-yellow-950") : ""}${l ? chip(`✉️ ${l} letter${l > 1 ? "s" : ""}`, "bg-sky-100 text-sky-700") : ""}${next.hasDog ? chip("🐕 DOG", "bg-red-100 text-red-700") : ""}</div>
+        ${next.safePlace ? `<p class="text-base font-semibold text-yellow-900 bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2">Drop-off: ${esc(next.safePlace)}</p>` : ""}
+        ${next.notes ? `<p class="text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 whitespace-pre-line">${esc(next.notes)}</p>` : ""}
+        <div class="grid grid-cols-2 gap-2 pt-1">
+          <button data-van="delivered" class="col-span-2 py-4 rounded-xl bg-emerald-600 text-white text-lg font-bold shadow">✓ Delivered</button>
+          <a href="${directionsUrl(next)}" target="_blank" rel="noopener" class="py-3 rounded-xl bg-primary text-primary-foreground text-sm font-bold text-center">🧭 Directions</a>
+          <button data-van="skipped" class="py-3 rounded-xl border border-border bg-background text-sm font-bold">↷ Skip for now</button>
+          <button data-van="pin" class="py-3 rounded-xl border border-border bg-background text-sm font-semibold">${next.lat ? "📍 Pinned · re-pin" : "📍 Pin this house"}</button>
+          <button data-van="say" class="py-3 rounded-xl border border-border bg-background text-sm font-semibold">🔊 Say it again</button>
+        </div></div>`;
+    } else html += `<div class="bg-emerald-50 border-2 border-emerald-300 rounded-2xl p-6 text-center"><p class="text-2xl font-bold text-emerald-800">All done ✓</p><p class="text-sm text-emerald-800 mt-1">${done} delivered${skipped.length ? ` · ${skipped.length} skipped — tap one below to go back to it` : ""}</p></div>`;
+    const upcoming = run.filter(s => !deliv.has(s.id) && s !== next).slice(0, 8);
+    if (upcoming.length) html += `<p class="text-xs font-bold uppercase tracking-wide text-muted-foreground pt-3 px-1">Coming up</p>` + upcoming.map(s => {
+      const n = parcelCount(s.id), l = letterCount(s.id);
+      return `<div class="bg-white rounded-xl border px-3 py-2 flex items-center gap-2"><span class="text-xs font-bold text-muted-foreground w-8">#${s.stopOrder}</span><span class="flex-1 font-semibold text-sm truncate">${esc(s.businessName || splitPipe(s.residents)[0] || "Stop " + s.stopOrder)}</span>${n ? `<span class="text-xs font-bold">📦${n}${zoneOf(s) ? " " + esc(zoneOf(s)) : ""}</span>` : ""}${l ? `<span class="text-xs">✉️${l}</span>` : ""}${s.hasDog ? "🐕" : ""}</div>`;
+    }).join("");
+    if (skipped.length) html += `<p class="text-xs font-bold uppercase tracking-wide text-muted-foreground pt-3 px-1">Skipped · tap to put back</p>` + skipped.map(s => `<button data-unskip="${s.id}" class="w-full text-left bg-white rounded-xl border border-dashed px-3 py-2 text-sm">#${s.stopOrder} ${esc(s.businessName || splitPipe(s.residents)[0] || "")}</button>`).join("");
+    listEl.innerHTML = html;
+    $("[data-foot]").innerHTML = `Say “delivered”, “skip” or “repeat”. On the van screen: “Hey Google, navigate to” + the eircode. ` +
+      (S.vanAll ? `<button data-vantoday class="underline">Today's post only</button>` : `<button data-vanall class="underline">Show whole route</button>`);
   }
 
   /* ---- drawing ---- */
@@ -1205,7 +1327,7 @@ function renderRoute(B) {
     const ve = $("[data-verr]"); ve.style.display = S.voiceErr && !S.reorder ? "" : "none"; ve.textContent = S.voiceErr || "";
     const br = $("[data-boxready]"); br.style.display = S.mode === "delivery" && sec ? "" : "none";
     if (sec) $("p", br).textContent = `📍 Box ${sec.boxNumber} Ready — ${sec.name}`;
-    const pb = $("[data-parcelbar]"), total = parcels.reduce((n, p) => n + p.count, 0), houses = new Set(parcels.map(p => p.stopId)).size;
+    const pb = $("[data-parcelbar]"), total = onlyParcels().reduce((n, p) => n + p.count, 0), houses = new Set(onlyParcels().map(p => p.stopId)).size;
     pb.style.display = S.mode === "parcel" && !S.reorder ? "" : "none";
     $("p", pb).textContent = total ? `📦 ${total} parcel${total > 1 ? "s" : ""} today · ${houses} house${houses > 1 ? "s" : ""}` : "📦 No parcels logged yet today — say “McGinley, one parcel” or tap a house";
     $("[data-plist]").textContent = S.parcelList ? "Back to box" : "Today's list";
@@ -1214,7 +1336,7 @@ function renderRoute(B) {
   }
   function listToShow() {
     if (S.parcelList) {
-      const ids = new Set(parcels.map(p => p.stopId)), pos = id => sections.findIndex(x => x.id === id);
+      const ids = new Set(onlyParcels().map(p => p.stopId)), pos = id => sections.findIndex(x => x.id === id);
       return all.filter(s => ids.has(s.id)).sort((a, b) => pos(a.sectionId) - pos(b.sectionId) || a.stopOrder - b.stopOrder);
     }
     const base = sectionStops(), q = S.query.trim();
@@ -1225,6 +1347,7 @@ function renderRoute(B) {
   const addBtn = (label, after) => `<button data-insert="${after}" class="w-full flex items-center justify-center gap-1.5 py-1 my-0.5 rounded-lg border border-dashed border-primary/25 text-primary/60 text-xs font-semibold hover:border-primary/60 hover:text-primary hover:bg-primary/5 transition-all disabled:opacity-40">${icon("plus", 12)}${label}</button>`;
   const parcelBadge = s => { const n = parcelCount(s.id); return n ? `<div class="mb-1"><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-yellow-400 text-yellow-950">📦 ${n} today</span></div>` : ""; };
   function drawList() {
+    if (S.mode === "van" && !S.query.trim()) { $("[data-clear]").style.display = "none"; if (sortable) { sortable.destroy(); sortable = null; } return drawVan(); }
     const q = S.query.trim(), searching = q.length > 0 && !S.reorder && !S.parcelList, items = listToShow(), base = sectionStops(), P = pool();
     const tapMode = S.mode === "parcel" || (S.pendingParcel && S.pendingParcel.until > Date.now());
     $("[data-clear]").style.display = S.query ? "" : "none";
@@ -1324,6 +1447,7 @@ function renderRoute(B) {
     }
     const c = S.lastCtx;
     if (c && Date.now() - c.timestamp <= 10000) {
+      if (S.mode === "sorting") { if (S.lastLetter) moveLastLetter(stop); else logLetter(stop); }
       markCorrected(stop);
       if (shouldLearn(c, stop)) ri.recordCorrection(c.transcript, stop.id).catch(x => console.warn("[Learning] Failed to record correction:", x));
       S.lastCtx = null;
@@ -1346,8 +1470,10 @@ function renderRoute(B) {
   $("[data-modes]").onclick = e => {
     const b = e.target.closest("[data-mode]"); if (!b) return;
     S.mode = b.dataset.mode; S.query = ""; S.riPick = null; S.parcelList = false; S.pendingParcel = null; qEl.value = ""; window.speechSynthesis?.cancel();
+    lsSet("rl-mode-" + routeId, S.mode);
     if (S.mode === "delivery" && sections[0]) S.sectionId = sections[0].id;
-    drawHeader(); drawList();
+    drawHeader(); drawList(); window.scrollTo(0, 0);
+    if (S.mode === "van" && vanRun().length) speak(vanCallout(vanNext(), "First stop"));
   };
   $("[data-plist]").onclick = () => { S.parcelList = !S.parcelList; S.query = ""; qEl.value = ""; drawHeader(); drawList(); window.scrollTo(0, 0); };
   qEl.oninput = () => { S.query = qEl.value; S.riPick = null; S.parcelList = false; drawList(); riVisual(); };
@@ -1362,7 +1488,16 @@ function renderRoute(B) {
   const ftb = $("[data-ft]"); if (ftb) ftb.onclick = () => { S.fieldTest = !S.fieldTest; lsSet(FT_KEY, String(S.fieldTest)); toast.success(S.fieldTest ? "Field test logging enabled" : "Field test logging disabled"); drawHeader(); };
   const exb = $("[data-export]"); if (exb) exb.onclick = exportMappings;
   const ro = $("[data-reorder]"); if (ro) ro.onclick = () => { S.reorder = !S.reorder; S.query = ""; qEl.value = ""; S.parcelList = false; drawHeader(); drawList(); };
+  const vanClicks = e => {
+    const v = e.target.closest("[data-van]");
+    if (v) { const nx = vanNext(); if (!nx) return; if (v.dataset.van === "pin") return pinStop(nx); if (v.dataset.van === "say") return speak(vanCallout(nx)); return markStop(nx, v.dataset.van); }
+    if (e.target.closest("[data-vanall]")) { S.vanAll = true; drawList(); speak(vanCallout(vanNext(), "First stop")); return true; }
+    if (e.target.closest("[data-vantoday]")) { S.vanAll = false; drawList(); return true; }
+    const un = e.target.closest("[data-unskip]"); if (un) { markStop(all.find(x => x.id === +un.dataset.unskip), null); return true; }
+  };
+  $("[data-foot]").addEventListener("click", vanClicks);
   listEl.addEventListener("click", e => {
+    if (S.mode === "van" && !S.query.trim()) return vanClicks(e);
     const ins = e.target.closest("[data-insert]"); if (ins) { ins.disabled = true; return insertAfter(+ins.dataset.insert); }
     const del = e.target.closest("[data-del]"); if (del) return deleteStop(+del.dataset.del);
     if (e.target.closest("[data-clearq]")) { S.query = ""; qEl.value = ""; return drawList(); }
