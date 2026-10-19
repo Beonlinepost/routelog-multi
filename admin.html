@@ -397,7 +397,36 @@ class RouteIntelligence {
     const filler = ["ah", "right", "ok", "okay", "for", "the", "a", "and", "or", "but", "hold", "on", "just", "sake", "god", "gods"];
     return r ? r.toLowerCase().split(/\s+/).filter(a => !filler.includes(a)).join("").replace(/^mc/i, "mac").replace(/['\-\s]/g, "") : "";
   }
+  /* Every name this route has ever learned is loaded once (and saved on the phone for offline).
+     A learned mishearing then works forever — and near-misses of it work too. */
+  async loadLearned() {
+    const key = `rl-learned-${this.routeId}`;
+    try {
+      const { data, error } = this.token
+        ? await sb.rpc("corrections_public", { p_token: this.token })
+        : await sb.from("corrections").select("stop_id,normalized_transcript,confirmation_count").eq("route_id", this.routeId).not("stop_id", "is", null);
+      if (error) throw error;
+      this.learned = new Map((data || []).sort((a, b) => a.confirmation_count - b.confirmation_count).map(r => [r.normalized_transcript, r.stop_id]));
+      lsSet(key, JSON.stringify([...this.learned]));
+    } catch (e) {
+      try { this.learned = new Map(JSON.parse(lsGet(key, "[]"))); } catch { this.learned = null; }
+    }
+  }
+  learnedLookup(normalized) {
+    if (!this.learned) return undefined;
+    if (this.learned.has(normalized)) return { stopId: this.learned.get(normalized), confidence: 0.95 };
+    if (this.index.fullNames.has(this.normalize(normalized))) return null;   // a real name always beats a near-miss
+    let best = null, bestScore = 0;
+    for (const [k, stopId] of this.learned) {
+      if (Math.abs(k.length - normalized.length) > 4) continue;
+      const sc = confidence(normalized, k);
+      if (sc > bestScore) { bestScore = sc; best = stopId; }
+    }
+    return bestScore >= 0.9 ? { stopId: best, confidence: 0.9, near: true } : null;
+  }
   async lookupPersistent(normalized) {
+    const local = this.learnedLookup(normalized);
+    if (local !== undefined) return local;
     if (this.cache.has(normalized)) return this.cache.get(normalized);
     let hit = null;
     try {
@@ -452,6 +481,7 @@ class RouteIntelligence {
     this.learning.record(transcript, stopId, 0.9, "user-selected");
     if (this.token && !stopId) return;   // relief link can't save free-typed names
     this.cache.set(n, stopId ? { stopId, confidence: 0.95 } : null);
+    if (stopId && this.learned) { this.learned.set(n, stopId); lsSet(`rl-learned-${this.routeId}`, JSON.stringify([...this.learned])); }
     let res;
     try {
       res = this.token
