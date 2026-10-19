@@ -406,8 +406,9 @@ class RouteIntelligence {
     const o = this.normalize(raw); if (!o) return [];
     const out = new Map();
     const p = await this.lookupPersistent(normTranscript(raw));
-    if (p && p.confidence >= (RI_CFG.learnedMappingConfidenceThreshold ?? 0.5)) {
-      out.set(p.stopId, { stopId: p.stopId, confidence: p.confidence, matchType: "persistent-learned" });
+    if (p) {
+      // A learned name is permanent: one confirmation is enough to use it straight away
+      out.set(p.stopId, { stopId: p.stopId, confidence: Math.max(p.confidence, 0.95), matchType: "persistent-learned" });
       return [...out.values()];
     }
     const local = this.learning.entries.filter(y => y.spokenTerm.toLowerCase() === raw.toLowerCase());
