@@ -221,10 +221,38 @@ function matchStop(stop, raw) {
   return matchSingle(stop, q, RI_CFG) || { matched: false, kind: "none" };
 }
 function stopMatches(stop, raw) { return matchStop(stop, raw).matched; }
+/* Eircode said or typed: "F94 W9X5", "F 9 4 W 9 X 5", or just the last four "W9X5" */
+const NUMWORDS = { zero: "0", oh: "0", one: "1", two: "2", to: "2", too: "2", three: "3", four: "4", for: "4", five: "5", six: "6", seven: "7", eight: "8", ate: "8", nine: "9" };
+function eircodeKey(raw) {
+  const k = raw.toLowerCase().split(/[\s,.-]+/).map(w => NUMWORDS[w] ?? w).join("").replace(/[^a-z0-9]/g, "").toUpperCase();
+  if (/^[A-Z]\d[0-9W][A-Z0-9]{4}$/.test(k)) return k;            // full code
+  if (/^[A-Z0-9]{4}$/.test(k) && /\d/.test(k) && /[A-Z]/.test(k)) return k; // unique last four
+  return null;
+}
+function eircodeMatches(stops, raw) {
+  const k = eircodeKey(raw); if (!k) return null;
+  const hits = stops.filter(s => { const e = (s.eircode || "").replace(/\s/g, "").toUpperCase(); return e.length === 7 && (e === k || (k.length === 4 && e.endsWith(k))); });
+  return hits.length ? hits : null;
+}
+/* "Laura and Vincent Gallagher" → the house where both live */
+function coupleNames(raw) {
+  const m = norm(raw).match(/^([a-z']+)\s+(?:and|&|an|n)\s+([a-z']+)\s+(.+)$/);
+  return m ? [`${m[1]} ${m[3]}`, `${m[2]} ${m[3]}`] : null;
+}
 /* level 1 = strict name, 2 = alias, 3 = partial/single word, 0 = none */
 function searchStops(stops, raw) {
   const t = raw.trim();
   if (!t) return { level: 0, results: stops };
+  const eh = eircodeMatches(stops, t);
+  if (eh) return { level: 1, results: eh, eircode: true };
+  const cp = coupleNames(t);
+  if (cp) {
+    const a = stops.filter(x => matchMultiWord(x, cp[0])), b = stops.filter(x => matchMultiWord(x, cp[1]));
+    const both = a.filter(x => b.includes(x));
+    if (both.length) return { level: 1, results: both, couple: true };
+    const either = [...new Set([...a, ...b])];
+    if (either.length) return { level: 1, results: either, couple: true };
+  }
   const q = norm(t);
   if (q.split(" ").filter(Boolean).length >= 2) {
     const u = stops.filter(p => matchMultiWord(p, q) !== null);
@@ -1042,8 +1070,11 @@ function renderRoute(B) {
   const ctx = (t, level, results) => ({ transcript: t, normalizedTranscript: normTranscript(t), matchLevel: level, matchResults: results, timestamp: Date.now() });
 
   /* resolve a spoken name to exactly one stop (or null + results) */
+  const nameFor = (stop, t) => { const cp = coupleNames(t); return cp ? spokenName(stop, matchStop(stop, cp[0]).matched ? matchStop(stop, cp[0]) : matchStop(stop, cp[1])) : spokenName(stop, matchStop(stop, t)); };
   async function resolve(t) {
     const P = pool(); if (!P.length) return { stop: null, results: [], level: 0 };
+    const special = (eircodeMatches(P, t) || coupleNames(t)) ? searchStops(P, t) : null;
+    if (special && special.results.length) return { stop: special.results.length === 1 ? special.results[0] : null, results: special.results, level: 1, multi: special.results.length > 1 };
     if (RI_CFG.enabled !== false) {
       try { const rr = await ri.search(t), hit = pickConfident(rr, P); if (hit) return { stop: hit, results: [hit], level: 3, ri: true, learned: /learned/.test(rr.find(x => x.stopId === hit.id)?.matchType || "") }; }
       catch (x) { console.warn("[RI] search failed, falling back:", x); }
@@ -1108,11 +1139,11 @@ function renderRoute(B) {
     const r = await resolve(t);
     S.lastCtx = ctx(t, r.level, r.results);
     const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
-    if (r.ri) return say(callout(r.stop, spokenName(r.stop, matchStop(r.stop, t))), t, "found", r.stop, r.results, r.learned);
+    if (r.ri) return say(callout(r.stop, nameFor(r.stop, t)), t, "found", r.stop, r.results, r.learned);
     if (!r.results.length) { say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: sectionStops(), onSave: saveName }); return; }
     if (r.level === 1 || r.level === 2) {
       if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
-      return say(callout(r.stop, spokenName(r.stop, matchStop(r.stop, t))), t, "found", r.stop, r.results);
+      return say(callout(r.stop, nameFor(r.stop, t)), t, "found", r.stop, r.results);
     }
     if (S.mode === "delivery") { const s0 = r.results[0]; return say(callout(s0, spokenName(s0, matchStop(s0, t))), t, "found", s0, r.results); }
     say("Closest matches shown", t, "list", null, r.results);
