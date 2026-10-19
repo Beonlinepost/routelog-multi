@@ -30,6 +30,7 @@
 @media (min-width:48rem){.md\:col-span-1{grid-column:span 1/span 1}}
 @media (min-width:64rem){.lg\:grid-cols-6{grid-template-columns:repeat(6,minmax(0,1fr))}}
 .bg-amber-500{background-color:#f59e0b}.bg-yellow-400{background-color:#facc15}.border-yellow-300{border-color:#fde047}.text-yellow-950{color:#422006}
+.\!py-1{padding-top:.25rem!important;padding-bottom:.25rem!important}.bg-orange-50\/50{background-color:#fff7ed80}
 
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js"></script>
@@ -524,7 +525,7 @@ const TABS = [
   { id: "import", label: "Import", icon: "upload", desc: "Load a route from a spreadsheet (CSV)" },
   { id: "users", label: "Users", icon: "users", desc: "Who can see and edit which route" },
   { id: "learned-mappings", label: "Learned Mappings", icon: "brain", desc: "Manage speech recognition corrections" },
-  { id: "field-testing", label: "Field Testing", icon: "activity", desc: "Monitor Route Intelligence performance metrics" },
+  { id: "field-testing", label: "Field Testing (live)", icon: "activity", desc: "Every voice search as it happens — fix mistakes on the spot" },
   { id: "ri-config", label: "Route Intelligence", icon: "sliders", desc: "Configure search engine settings" },
   { id: "analytics", label: "System Analytics", icon: "chart", desc: "View cross-route statistics" }
 ];
@@ -750,55 +751,108 @@ async function tabMappings(body) {
   inner.onclick = async e => { const b = e.target.closest("[data-del]"); if (!b) return; const { error } = await sb.from("corrections").delete().eq("id", +b.dataset.del); if (error) return toast.error(error.message); toast.success("Deleted"); tabMappings(body); };
 }
 
-/* ---------- Field Testing ---------- */
+/* ---------- Field Testing (live log — fix as we go) ---------- */
 function fieldStats(ev) {
-  const r = { totalSearches: ev.length, successfulFirstTimeMatches: 0, searchesRequiringManualCorrection: 0, newLearnedMappingsCreated: 0, averageResponseTimeMs: 0, commonSpeechErrors: new Map(), learnedMappingsUsedCount: 0, fuzzyMatchingUsedCount: 0 };
-  let t = 0;
+  const voice = ev.filter(e => e.outcome !== "box");
+  const r = { totalSearches: ev.length, voiceSearches: voice.length, firstTime: 0, corrected: 0, noMatch: 0, list: 0, parcels: 0,
+    successfulFirstTimeMatches: 0, searchesRequiringManualCorrection: 0, newLearnedMappingsCreated: 0, averageResponseTimeMs: 0,
+    learnedMappingsUsedCount: 0, fuzzyMatchingUsedCount: 0, commonSpeechErrors: new Map() };
+  let t = 0, tn = 0;
   ev.forEach(o => {
-    if (o.learned_mapping_used || o.top_candidates?.[0]?.matchType === "exact") r.successfulFirstTimeMatches++;
-    if (o.manual_correction_made) { r.searchesRequiringManualCorrection++; r.newLearnedMappingsCreated++; }
+    const legacy = !o.outcome;   // rows from before every search was logged
+    if (o.outcome === "parcel") r.parcels++;
+    if (o.manual_correction_made) { r.corrected++; r.searchesRequiringManualCorrection++; r.newLearnedMappingsCreated++; }
+    else if (o.outcome === "found" || o.outcome === "parcel" || o.outcome === "box") r.firstTime++;
+    if (o.outcome === "no-match" && !o.manual_correction_made) r.noMatch++;
+    if (o.outcome === "list" && !o.manual_correction_made) r.list++;
     if (o.learned_mapping_used) r.learnedMappingsUsedCount++;
     if (o.fuzzy_matching_used) r.fuzzyMatchingUsedCount++;
-    t += o.response_time_ms || 0;
-    if (o.normalized_transcript) r.commonSpeechErrors.set(o.normalized_transcript, (r.commonSpeechErrors.get(o.normalized_transcript) || 0) + 1);
+    if (o.response_time_ms != null) { t += o.response_time_ms; tn++; }
+    if ((o.manual_correction_made || o.outcome === "no-match") && o.normalized_transcript) r.commonSpeechErrors.set(o.normalized_transcript, (r.commonSpeechErrors.get(o.normalized_transcript) || 0) + 1);
+    if (legacy && !o.manual_correction_made) r.firstTime++;
   });
-  r.averageResponseTimeMs = ev.length ? Math.round(t / ev.length) : 0;
+  r.successfulFirstTimeMatches = r.firstTime;
+  r.averageResponseTimeMs = tn ? Math.round(t / tn) : 0;
   return r;
 }
 const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
+let fieldTimer = null;
 async function tabField(body) {
-  const hours = +lsGet("rl-ft-hours", "24");
-  body.innerHTML = heading("Field Testing Dashboard", "Monitor Route Intelligence performance during live testing. Postmen turn logging on with the flask button in the app.") + routeSelect() +
-    `<div class="flex gap-2 mb-4">${[[24, "Last 24 hours"], [168, "Last 7 days"], [0, "All time"]].map(([h, l]) => `<button data-h="${h}" class="${h === hours ? btnPrimary : btnOutline}">${l}</button>`).join("")}</div><div data-inner></div>`;
+  clearInterval(fieldTimer);
+  const hours = +lsGet("rl-ft-hours", "24"), onlyIssues = lsGet("rl-ft-issues", "false") === "true";
+  body.innerHTML = heading("Field Testing — live", "Every voice search on the route, as it happens. Spot what it gets wrong and fix it on the spot. Updates every 20 seconds.") + routeSelect() +
+    `<div class="flex flex-wrap gap-2 mb-4 items-center">${[[24, "Last 24 hours"], [168, "Last 7 days"], [0, "All time"]].map(([h, l]) => `<button data-h="${h}" class="${h === hours ? btnPrimary : btnOutline}">${l}</button>`).join("")}
+      <label class="ml-2 flex items-center gap-2 text-sm"><input type="checkbox" data-issues ${onlyIssues ? "checked" : ""}> Only show problems</label></div><div data-inner></div>`;
   bindRouteSelect(() => tabField(body));
   $$("[data-h]").forEach(b => (b.onclick = () => { lsSet("rl-ft-hours", b.dataset.h); tabField(body); }));
+  $("[data-issues]").onchange = e => { lsSet("rl-ft-issues", String(e.target.checked)); tabField(body); };
   const inner = $("[data-inner]");
-  if (!A.routeSel) return (inner.innerHTML = `<div class="p-6 bg-muted rounded-lg text-center text-muted-foreground">Select a route above to view its field testing data.</div>`);
-  inner.innerHTML = `<div class="${card} text-center text-muted-foreground">Loading field test data...</div>`;
-  let q = sb.from("search_events").select("*").eq("route_id", A.routeSel).order("created_at", { ascending: false }).limit(5000);
-  if (hours) q = q.gte("created_at", new Date(Date.now() - hours * 3600e3).toISOString());
-  const { data: ev = [], error } = await q; if (error) return (inner.innerHTML = `<div class="${card} text-destructive">${esc(error.message)}</div>`);
-  const g = fieldStats(ev);
-  const tile = (l, v, s) => `<div class="p-4 bg-card rounded-lg border border-border"><div class="text-sm text-muted-foreground">${l}</div><div class="text-3xl font-bold text-foreground mt-2">${v}</div>${s ? `<div class="text-xs text-muted-foreground mt-1">${s}</div>` : ""}</div>`;
-  inner.innerHTML = !ev.length ? `<div class="${card} text-center text-muted-foreground">No field testing data yet. Start a voice search to begin logging metrics.</div>` : `
-    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
-      ${tile("Total Searches", g.totalSearches)}${tile("Success Rate", pct(g.successfulFirstTimeMatches, g.totalSearches) + "%", `${g.successfulFirstTimeMatches} first-time matches`)}
-      ${tile("Manual Corrections", pct(g.searchesRequiringManualCorrection, g.totalSearches) + "%", `${g.searchesRequiringManualCorrection} corrections`)}${tile("Avg Response Time", g.averageResponseTimeMs + "ms")}
-      ${tile("Learned Mappings Used", pct(g.learnedMappingsUsedCount, g.totalSearches) + "%", `${g.learnedMappingsUsedCount} searches`)}${tile("Fuzzy Matching Used", pct(g.fuzzyMatchingUsedCount, g.totalSearches) + "%", `${g.fuzzyMatchingUsedCount} searches`)}
-    </div>
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-      <div class="${card}"><h3 class="font-semibold mb-3">Most Common Speech Recognition Errors</h3>
-        ${[...g.commonSpeechErrors.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([k, n]) => `<div class="flex justify-between py-1 border-b border-border text-sm"><code class="text-xs">${esc(k)}</code><span class="text-muted-foreground">${n}x</span></div>`).join("")}</div>
-      <div class="${card}"><h3 class="font-semibold mb-3">Recent corrections</h3>
-        ${ev.slice(0, 10).map(o => `<div class="py-1 border-b border-border text-sm">“${esc(o.original_transcript)}” → <b>${esc(splitPipe(o.selected_stop_name)[0] || "")}</b> <span class="text-xs text-muted-foreground">${esc(o.app_mode || "")} · ${fmtDate(o.created_at)}</span></div>`).join("")}</div>
-    </div>
-    <div class="flex gap-2"><button data-json class="${btnOutline}">${icon("download", 16)}Export JSON</button><button data-csv class="${btnOutline}">${icon("download", 16)}Export CSV</button><button data-clear class="${btnDanger}">${icon("trash", 16)}Clear data</button></div>`;
-  if (!ev.length) return;
-  const stamp = new Date().toISOString().split("T")[0];
-  $("[data-json]", inner).onclick = () => downloadFile(`field-test-${A.routeSel}-${stamp}.json`, JSON.stringify({ exportedAt: new Date().toISOString(), totalEvents: ev.length, events: ev }, null, 2));
-  $("[data-csv]", inner).onclick = () => downloadFile(`field-test-${A.routeSel}-${stamp}.csv`, toCSV([["Timestamp", "Original Transcript", "Normalized Transcript", "Learned Mapping Used", "Fuzzy Matching Used", "Top Candidate", "Confidence", "Selected Stop", "Response Time (ms)", "Manual Correction", "Mode"],
-    ...ev.map(c => [c.created_at, c.original_transcript, c.normalized_transcript, c.learned_mapping_used ? "Yes" : "No", c.fuzzy_matching_used ? "Yes" : "No", c.top_candidates?.[0]?.stopName || "N/A", c.top_candidates?.[0]?.confidence?.toFixed?.(2) ?? "", c.selected_stop_name, c.response_time_ms, c.manual_correction_made ? "Yes" : "No", c.app_mode])]), "text/csv");
-  $("[data-clear]", inner).onclick = async () => { if (!confirm("Clear all field testing data for this route?")) return; const { error } = await sb.from("search_events").delete().eq("route_id", A.routeSel); if (error) return toast.error(error.message); toast.success("Cleared all field testing data"); tabField(body); };
+  if (!A.routeSel) return (inner.innerHTML = `<div class="p-6 bg-muted rounded-lg text-center text-muted-foreground">Select a route above to see its voice searches.</div>`);
+  inner.innerHTML = `<div class="${card} text-center text-muted-foreground">Loading…</div>`;
+  let stopsById = new Map();
+  try { stopsById = new Map((await fetchAll("stops", { route_id: A.routeSel }, ["id"])).map(x => [x.id, x])); } catch {}
+  const load = async () => {
+    let q = sb.from("search_events").select("*").eq("route_id", A.routeSel).order("created_at", { ascending: false }).limit(2000);
+    if (hours) q = q.gte("created_at", new Date(Date.now() - hours * 3600e3).toISOString());
+    const { data: ev = [], error } = await q;
+    if (error) return (inner.innerHTML = `<div class="${card} text-destructive">${esc(error.message)}</div>`);
+    draw(ev || []);
+  };
+  const badge = o => o.manual_correction_made ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-700">Corrected</span>`
+    : o.outcome === "found" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">Found ✓</span>`
+    : o.outcome === "parcel" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-yellow-100 text-yellow-800">Parcel ✓</span>`
+    : o.outcome === "box" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-sky-100 text-sky-700">Box</span>`
+    : o.outcome === "list" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600">Showed list</span>`
+    : o.outcome === "no-match" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">No match</span>`
+    : `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-700">Corrected</span>`;
+  const isIssue = o => !o.fixed && (o.manual_correction_made || o.outcome === "no-match" || o.outcome === "list");
+  function draw(all) {
+    const g = fieldStats(all), ev = onlyIssues ? all.filter(isIssue) : all, v = g.voiceSearches - 0;
+    const tile = (l, val, sub) => `<div class="p-4 bg-card rounded-lg border border-border"><div class="text-sm text-muted-foreground">${l}</div><div class="text-3xl font-bold text-foreground mt-2">${val}</div>${sub ? `<div class="text-xs text-muted-foreground mt-1">${sub}</div>` : ""}</div>`;
+    inner.innerHTML = !all.length ? `<div class="${card} text-center text-muted-foreground">No voice searches logged yet. Use the mic in the app — every search appears here within 20 seconds.</div>` : `
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+        ${tile("Voice searches", g.totalSearches)}${tile("Right first time", pct(g.firstTime, g.totalSearches) + "%", `${g.firstTime} searches`)}
+        ${tile("Needed a tap", g.corrected, "postman picked the house")}${tile("No match", g.noMatch, "nothing found")}
+        ${tile("Parcels by voice", g.parcels)}${tile("Avg reply", g.averageResponseTimeMs ? (g.averageResponseTimeMs / 1000).toFixed(1) + "s" : "—")}
+      </div>
+      <div class="${card} overflow-x-auto mb-6"><table class="w-full text-sm"><thead><tr class="text-left text-muted-foreground border-b border-border">
+        <th class="py-2 pr-3">When</th><th class="py-2 pr-3">Heard</th><th class="py-2 pr-3">App said</th><th class="py-2 pr-3">Result</th><th class="py-2 pr-3">Right house</th><th class="py-2">Fix</th></tr></thead>
+      <tbody>${ev.slice(0, 300).map(o => {
+        const st = o.selected_stop_id ? stopsById.get(o.selected_stop_id) : null;
+        const canAlias = st && (o.manual_correction_made) && !o.fixed && o.original_transcript;
+        return `<tr class="border-b border-border ${isIssue(o) ? "bg-orange-50/50" : ""}" data-eid="${o.id}">
+          <td class="py-2 pr-3 whitespace-nowrap text-xs text-muted-foreground">${new Date(o.created_at).toLocaleTimeString("en-IE", { hour: "2-digit", minute: "2-digit" })}<br>${new Date(o.created_at).toLocaleDateString("en-IE", { day: "numeric", month: "short" })} · ${esc(o.app_mode || "")}${o.by_relief ? " · relief" : ""}</td>
+          <td class="py-2 pr-3 font-semibold">“${esc(o.original_transcript || "")}”</td>
+          <td class="py-2 pr-3 text-muted-foreground">${esc(o.spoken || "")}</td>
+          <td class="py-2 pr-3">${badge(o)}${o.learned_mapping_used ? ` <span class="text-xs text-muted-foreground">learned</span>` : ""}</td>
+          <td class="py-2 pr-3">${st ? `${esc(st.business_name || splitPipe(st.residents)[0] || "")}<div class="text-xs text-muted-foreground">#${st.stop_order}</div>` : esc(o.selected_stop_name || "—")}</td>
+          <td class="py-2 whitespace-nowrap">${o.fixed ? `<span class="text-xs text-emerald-700 font-semibold">Fixed ✓</span>` : `
+            ${canAlias ? `<button data-alias="${o.id}" class="${btnOutline} !py-1 text-xs" title="Adds what the phone heard to this house's aliases, so it's found next time">+ Add as alias</button>` : ""}
+            ${isIssue(o) ? `<button data-fix="${o.id}" class="${btnOutline} !py-1 text-xs">Mark fixed</button>` : ""}`}</td></tr>`;
+      }).join("")}</tbody></table>${ev.length > 300 ? `<p class="text-xs text-muted-foreground mt-2">Showing latest 300 of ${ev.length}</p>` : ""}</div>
+      <div class="flex gap-2"><button data-csv class="${btnOutline}">${icon("download", 16)}Export CSV</button><button data-clear class="${btnDanger}">${icon("trash", 16)}Clear log</button></div>`;
+    $("[data-csv]", inner)?.addEventListener("click", () => downloadFile(`voice-searches-${A.routeSel}-${new Date().toISOString().slice(0, 10)}.csv`, toCSV([["Time", "Mode", "Relief", "Heard", "App said", "Result", "Corrected", "Right house", "Reply ms"],
+      ...all.map(o => [o.created_at, o.app_mode, o.by_relief ? "yes" : "", o.original_transcript, o.spoken, o.outcome, o.manual_correction_made ? "yes" : "", o.selected_stop_name, o.response_time_ms])]), "text/csv"));
+    $("[data-clear]", inner)?.addEventListener("click", async () => { if (!confirm("Clear the voice search log for this route?")) return; const { error } = await sb.from("search_events").delete().eq("route_id", A.routeSel); if (error) return toast.error(error.message); toast.success("Cleared"); load(); });
+    inner.onclick = async e => {
+      const al = e.target.closest("[data-alias]"), fx = e.target.closest("[data-fix]");
+      if (!al && !fx) return;
+      const o = all.find(x => x.id === +(al || fx).dataset[al ? "alias" : "fix"]);
+      if (al) {
+        const st = stopsById.get(o.selected_stop_id), heard = o.original_transcript.trim();
+        const list = splitPipe(st.aliases); if (!list.some(x => x.toLowerCase() === heard.toLowerCase())) list.push(heard);
+        const { error } = await sb.from("stops").update({ aliases: list.join(" | ") }).eq("id", st.id);
+        if (error) return toast.error(error.message);
+        st.aliases = list.join(" | ");
+        await sb.rpc("record_correction", { p_route_id: A.routeSel, p_stop_id: st.id, p_original: heard, p_normalized: heard.toLowerCase().replace(/\s+/g, " "), p_tags: ["admin"] });
+        toast.success(`“${heard}” added to ${st.business_name || splitPipe(st.residents)[0]}`);
+      }
+      await sb.from("search_events").update({ fixed: true }).eq("id", o.id);
+      o.fixed = true; draw(all);
+    };
+  }
+  await load();
+  fieldTimer = setInterval(() => { if (A.tab === "field-testing" && document.visibilityState === "visible") load(); else clearInterval(fieldTimer); }, 20000);
 }
 
 /* ---------- Route Intelligence config ---------- */
@@ -832,7 +886,7 @@ function tabConfig(body) {
 /* ---------- System Analytics ---------- */
 async function tabAnalytics(body) {
   body.innerHTML = heading("System Analytics", "View cross-route statistics and performance metrics") + `<div data-inner class="${card} text-center text-muted-foreground">Loading analytics...</div>`;
-  const { data: ev = [] } = await sb.from("search_events").select("route_id,learned_mapping_used,top_candidates,manual_correction_made,fuzzy_matching_used,response_time_ms,normalized_transcript").limit(20000);
+  const { data: ev = [] } = await sb.from("search_events").select("route_id,outcome,learned_mapping_used,manual_correction_made,fuzzy_matching_used,response_time_ms,normalized_transcript").limit(20000);
   const g = fieldStats(ev || []), stats = [...A.stats.values()];
   const sum = k => stats.reduce((s, x) => s + (x[k] || 0), 0);
   const tile = (l, v, ic) => `<div class="p-4 bg-card rounded-lg border border-border"><div class="flex items-center justify-between"><div><div class="text-sm text-muted-foreground">${l}</div><div class="text-3xl font-bold text-foreground mt-2">${v}</div></div>${icon(ic, 24, "text-primary")}</div></div>`;

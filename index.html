@@ -32,6 +32,7 @@
 @media (min-width:48rem){.md\:col-span-1{grid-column:span 1/span 1}}
 @media (min-width:64rem){.lg\:grid-cols-6{grid-template-columns:repeat(6,minmax(0,1fr))}}
 .bg-amber-500{background-color:#f59e0b}.bg-yellow-400{background-color:#facc15}.border-yellow-300{border-color:#fde047}.text-yellow-950{color:#422006}
+.\!py-1{padding-top:.25rem!important;padding-bottom:.25rem!important}.bg-orange-50\/50{background-color:#fff7ed80}
 
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js"></script>
@@ -933,7 +934,7 @@ function renderRoute(B) {
   const FT_KEY = "routelog:fieldTestMode";
   const S = {
     sectionId: sections[0]?.id ?? 0, query: "", mode: "sorting", reorder: false, parcelList: false,
-    fieldTest: !share && lsGet(FT_KEY) === "true", voiceErr: null, lastCtx: null, searchStart: null, riPick: null, pendingParcel: null
+    fieldTest: share || lsGet(FT_KEY) !== "false", voiceErr: null, lastCtx: null, searchStart: null, riPick: null, pendingParcel: null
   };
   const ri = new RouteIntelligence(routeId); ri.token = token; ri.build(all);
   const sectionStops = () => all.filter(s => s.sectionId === S.sectionId).sort((a, b) => a.stopOrder - b.stopOrder);
@@ -1014,7 +1015,7 @@ function renderRoute(B) {
   async function resolve(t) {
     const P = pool(); if (!P.length) return { stop: null, results: [], level: 0 };
     if (RI_CFG.enabled !== false) {
-      try { const hit = pickConfident(await ri.search(t), P); if (hit) return { stop: hit, results: [hit], level: 3, ri: true }; }
+      try { const rr = await ri.search(t), hit = pickConfident(rr, P); if (hit) return { stop: hit, results: [hit], level: 3, ri: true, learned: /learned/.test(rr.find(x => x.stopId === hit.id)?.matchType || "") }; }
       catch (x) { console.warn("[RI] search failed, falling back:", x); }
     }
     const { level, results } = searchStops(P, t);
@@ -1029,15 +1030,30 @@ function renderRoute(B) {
     return { stop: results.length === 1 ? results[0] : null, results, level };
   }
 
+  /* ---- field-test log: every voice search, so we can fix things as we go ---- */
+  async function logSearch(heard, outcome, spoken, stop, results, learned) {
+    if (!S.fieldTest) return;
+    const name = stop ? (stop.businessName || splitPipe(stop.residents)[0] || `Stop ${stop.stopOrder}`) : null;
+    const cand = (results || []).slice(0, 5).map(x => ({ stopId: x.id, stopName: splitPipe(x.residents)[0] || x.businessName || "", stopOrder: x.stopOrder }));
+    const ms = S.searchStart ? Date.now() - S.searchStart : null;
+    S.lastEventId = null;
+    try {
+      const { data } = await sb.rpc("log_search", { p_route_id: routeId, p_token: token, p_section_id: S.sectionId, p_heard: heard, p_outcome: outcome,
+        p_spoken: spoken, p_stop_id: stop?.id ?? null, p_stop_name: name, p_candidates: cand, p_ms: ms, p_mode: S.mode, p_learned: !!learned });
+      S.lastEventId = data ?? null; S.lastEventStopId = stop?.id ?? null;
+    } catch (e) { console.warn("[FieldTest] log failed", e); }
+  }
+  function say(text, heard, outcome, stop, results, learned) { speak(text); logSearch(heard, outcome, text, stop, results, learned); }
+
   async function onTranscript(text, isFinal) {
     S.query = text; qEl.value = text; S.riPick = null; S.parcelList = false; drawList();
     if (!isFinal) return;
     const t = text.trim(); if (!t) return;
-    if (S.fieldTest) S.searchStart = Date.now();
+    S.searchStart = Date.now();
     if (S.mode === "delivery") {
       const m = t.match(/^box\s+(\d+)$/i);
-      if (m) { const n = +m[1], sec = sections.find(x => x.boxNumber === n); if (sec) { selectSection(sec.id); speak(`Box ${n} ready. ${sec.name}.`); } else speak(`Box ${n} not found.`); return; }
-      if (/^next\s+box$/i.test(t)) { const i = sections.findIndex(x => x.id === S.sectionId); if (i >= 0 && i < sections.length - 1) { const nx = sections[i + 1]; selectSection(nx.id); speak(`Box ${nx.boxNumber} ready. ${nx.name}.`); } else speak("No next box."); return; }
+      if (m) { const n = +m[1], sec = sections.find(x => x.boxNumber === n); if (sec) { selectSection(sec.id); say(`Box ${n} ready. ${sec.name}.`, t, "box"); } else say(`Box ${n} not found.`, t, "no-match"); return; }
+      if (/^next\s+box$/i.test(t)) { const i = sections.findIndex(x => x.id === S.sectionId); if (i >= 0 && i < sections.length - 1) { const nx = sections[i + 1]; selectSection(nx.id); say(`Box ${nx.boxNumber} ready. ${nx.name}.`, t, "box"); } else say("No next box.", t, "box"); return; }
     }
     /* ---- parcel logging by voice ---- */
     const pp = S.mode !== "delivery" ? parseParcel(t) : null;
@@ -1046,30 +1062,30 @@ function renderRoute(B) {
       const r = await resolve(pp.name);
       // one-word names ("McGinley") must be unique before we log a parcel against them
       const oneWord = pp.name.split(/\s+/).filter(Boolean).length === 1;
-      const learned = r.ri && (await ri.lookupPersistent(normTranscript(pp.name)));
+      const learned = r.learned;
       if (r.stop && oneWord && !learned && searchStops(pool(), pp.name).results.length > 1) { r.results = searchStops(pool(), pp.name).results; r.stop = null; }
       S.lastCtx = ctx(pp.name, r.level, r.results);
       if (r.stop && !r.weak) {
         await logParcel(r.stop, pp.count, "voice");
-        speak(`${countWord(pp.count)}. ${spokenName(r.stop, matchStop(r.stop, pp.name)) || "Stop " + r.stop.stopOrder}. ${r.stop.road || ""}`.trim());
+        say(`${countWord(pp.count)}. ${spokenName(r.stop, matchStop(r.stop, pp.name)) || "Stop " + r.stop.stopOrder}. ${r.stop.road || ""}`.trim(), t, "parcel", r.stop, r.results, !!learned);
       } else {
         S.pendingParcel = { count: pp.count, until: Date.now() + 20000 };
         drawList();
-        speak(r.results.length ? `Which ${pp.name}? Tap the house` : `No match for ${pp.name}`);
+        say(r.results.length ? `Which ${pp.name}? Tap the house` : `No match for ${pp.name}`, t, r.results.length ? "list" : "no-match", null, r.results);
       }
       return;
     }
     const r = await resolve(t);
     S.lastCtx = ctx(t, r.level, r.results);
     const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
-    if (r.ri) return speak(callout(r.stop, spokenName(r.stop, matchStop(r.stop, t))));
-    if (!r.results.length) { speak(multiWord ? `No exact match found for ${t}` : `No match for ${t}`); openSaveNameModal({ transcript: t, stops: sectionStops(), onSave: saveName }); return; }
+    if (r.ri) return say(callout(r.stop, spokenName(r.stop, matchStop(r.stop, t))), t, "found", r.stop, r.results, r.learned);
+    if (!r.results.length) { say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: sectionStops(), onSave: saveName }); return; }
     if (r.level === 1 || r.level === 2) {
-      if (r.multi) { const w = t.split(/\s+/); return speak(`Multiple ${w[w.length - 1]} matches found`); }
-      return speak(callout(r.stop, spokenName(r.stop, matchStop(r.stop, t))));
+      if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
+      return say(callout(r.stop, spokenName(r.stop, matchStop(r.stop, t))), t, "found", r.stop, r.results);
     }
-    if (S.mode === "delivery") { const s = r.results[0]; return speak(callout(s, spokenName(s, matchStop(s, t)))); }
-    speak("Closest matches shown");
+    if (S.mode === "delivery") { const s0 = r.results[0]; return say(callout(s0, spokenName(s0, matchStop(s0, t))), t, "found", s0, r.results); }
+    say("Closest matches shown", t, "list", null, r.results);
   }
   async function saveName(transcript, stopId, label) {
     await ri.recordCorrection(transcript, stopId || 0, stopId ? ["user-selected"] : []);
@@ -1231,27 +1247,24 @@ function renderRoute(B) {
   // Learn only real mishearings: if the tapped house already matched what was heard
   // (e.g. "McGinley" and there are 6 McGinleys), there's nothing to learn.
   const shouldLearn = (c, stop) => !!(c && c.transcript) && !(stopMatches(stop, c.transcript) && (c.matchResults || []).some(x => x.id === stop.id));
+  function markCorrected(stop) {
+    if (!S.lastEventId || stop.id === S.lastEventStopId) return;
+    const id = S.lastEventId; S.lastEventId = null;
+    sb.rpc("mark_search_corrected", { p_id: id, p_token: token, p_stop_id: stop.id, p_stop_name: stop.businessName || splitPipe(stop.residents)[0] || "" }).then(() => {}, () => {});
+  }
   function onTap(stop) {
     if (S.mode === "parcel" || (S.pendingParcel && S.pendingParcel.until > Date.now())) {
-      const n = S.pendingParcel?.until > Date.now() ? S.pendingParcel.count : 1;
+      const pending = S.pendingParcel?.until > Date.now();
+      const n = pending ? S.pendingParcel.count : 1;
       const c0 = S.lastCtx;
-      if (S.pendingParcel && c0 && Date.now() - c0.timestamp <= 20000 && shouldLearn(c0, stop)) ri.recordCorrection(c0.transcript, stop.id).catch(() => {});
+      if (pending) { markCorrected(stop); if (c0 && Date.now() - c0.timestamp <= 20000 && shouldLearn(c0, stop)) ri.recordCorrection(c0.transcript, stop.id).catch(() => {}); }
       S.pendingParcel = null;
       return logParcel(stop, n, "tap");
     }
     const c = S.lastCtx;
-    if (c && Date.now() - c.timestamp <= 10000 && shouldLearn(c, stop)) {
-      ri.recordCorrection(c.transcript, stop.id).catch(x => console.warn("[Learning] Failed to record correction:", x));
-      if (S.fieldTest && S.searchStart && !share) {
-        sb.from("search_events").insert({
-          route_id: routeId, section_id: S.sectionId, original_transcript: c.transcript, normalized_transcript: c.normalizedTranscript,
-          learned_mapping_used: false, fuzzy_matching_used: c.matchLevel === 3,
-          top_candidates: c.matchResults.slice(0, 5).map((x, i) => ({ stopId: x.id, stopName: x.residents || "Unknown", confidence: 1 - i * 0.1, matchType: i === 0 && c.matchLevel >= 1 ? "exact" : "fuzzy" })),
-          selected_stop_id: stop.id, selected_stop_name: stop.residents || "Unknown", response_time_ms: Date.now() - S.searchStart,
-          manual_correction_made: true, correction_from_stop_id: c.matchResults[0]?.id ?? null, correction_to_stop_id: stop.id, app_mode: S.mode
-        }).then(({ error }) => error && console.warn("[FieldTest] log failed", error));
-        S.searchStart = null;
-      }
+    if (c && Date.now() - c.timestamp <= 10000) {
+      markCorrected(stop);
+      if (shouldLearn(c, stop)) ri.recordCorrection(c.transcript, stop.id).catch(x => console.warn("[Learning] Failed to record correction:", x));
       S.lastCtx = null;
     }
     if (canEdit) openEdit(stop);
