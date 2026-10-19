@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
 <meta name="theme-color" content="#0f1f33">
-<meta name="apple-mobile-web-app-capable" content="yes">
 <title>RouteLog Admin</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -30,6 +29,7 @@
 .hover\:border-red-300:hover{border-color:#fca5a5}
 @media (min-width:48rem){.md\:col-span-1{grid-column:span 1/span 1}}
 @media (min-width:64rem){.lg\:grid-cols-6{grid-template-columns:repeat(6,minmax(0,1fr))}}
+.bg-amber-500{background-color:#f59e0b}.bg-yellow-400{background-color:#facc15}.border-yellow-300{border-color:#fde047}.text-yellow-950{color:#422006}
 
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js"></script>
@@ -129,6 +129,11 @@ function toStop(r) {
     road: r.road, eircode: r.eircode, searchTags: r.search_tags, hasDog: !!r.has_dog,
     safePlace: r.safe_place, notes: r.notes, lat: r.lat, lng: r.lng
   };
+}
+function fromStop(s) {
+  return { id: s.id, route_id: s.routeId, section_id: s.sectionId, stop_order: s.stopOrder, side: s.side, property_type: s.propertyType,
+    residents: s.residents, aliases: s.aliases, business_name: s.businessName, house_name: s.houseName, house_number: s.houseNumber,
+    road: s.road, eircode: s.eircode, search_tags: s.searchTags, has_dog: !!s.hasDog, safe_place: s.safePlace, notes: s.notes, lat: s.lat, lng: s.lng };
 }
 function toSection(r) { return { id: r.id, routeId: r.route_id, position: r.position, name: r.name, boxNumber: r.box_number }; }
 
@@ -395,7 +400,9 @@ class RouteIntelligence {
     if (this.cache.has(normalized)) return this.cache.get(normalized);
     let hit = null;
     try {
-      const { data } = await sb.rpc("lookup_correction", { p_route_id: this.routeId, p_normalized: normalized });
+      const { data } = this.token
+        ? await sb.rpc("lookup_correction_public", { p_token: this.token, p_normalized: normalized })
+        : await sb.rpc("lookup_correction", { p_route_id: this.routeId, p_normalized: normalized });
       if (data && data.length) hit = { stopId: data[0].stop_id, confidence: Number(data[0].confidence) };
     } catch (e) { console.warn("[RI] lookup failed", e); }
     this.cache.set(normalized, hit);
@@ -442,8 +449,16 @@ class RouteIntelligence {
     const n = normTranscript(transcript);
     this.cache.delete(n);
     this.learning.record(transcript, stopId, 0.9, "user-selected");
-    const { error } = await sb.rpc("record_correction", { p_route_id: this.routeId, p_stop_id: stopId, p_original: transcript, p_normalized: n, p_tags: tags });
-    if (error) throw error;
+    if (this.token && !stopId) return;   // relief link can't save free-typed names
+    this.cache.set(n, stopId ? { stopId, confidence: 0.95 } : null);
+    let res;
+    try {
+      res = this.token
+        ? await sb.rpc("record_correction_public", { p_token: this.token, p_stop_id: stopId, p_original: transcript, p_normalized: n })
+        : await sb.rpc("record_correction", { p_route_id: this.routeId, p_stop_id: stopId, p_original: transcript, p_normalized: n, p_tags: tags });
+    } catch (e) { res = { error: e }; }
+    if (res.error && typeof OFF !== "undefined" && OFF.isNetErr(res.error)) { OFF.push({ type: "correction", token: this.token, routeId: this.routeId, stopId, original: transcript, normalized: n, tags }); return; }
+    if (res.error) throw res.error;
   }
 }
 /* first RI result >= 0.8 that exists in the current search pool */

@@ -4,8 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
 <meta name="theme-color" content="#0f1f33">
-<meta name="apple-mobile-web-app-capable" content="yes">
 <title>RouteLog</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -30,6 +31,7 @@
 .hover\:border-red-300:hover{border-color:#fca5a5}
 @media (min-width:48rem){.md\:col-span-1{grid-column:span 1/span 1}}
 @media (min-width:64rem){.lg\:grid-cols-6{grid-template-columns:repeat(6,minmax(0,1fr))}}
+.bg-amber-500{background-color:#f59e0b}.bg-yellow-400{background-color:#facc15}.border-yellow-300{border-color:#fde047}.text-yellow-950{color:#422006}
 
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js"></script>
@@ -129,6 +131,11 @@ function toStop(r) {
     road: r.road, eircode: r.eircode, searchTags: r.search_tags, hasDog: !!r.has_dog,
     safePlace: r.safe_place, notes: r.notes, lat: r.lat, lng: r.lng
   };
+}
+function fromStop(s) {
+  return { id: s.id, route_id: s.routeId, section_id: s.sectionId, stop_order: s.stopOrder, side: s.side, property_type: s.propertyType,
+    residents: s.residents, aliases: s.aliases, business_name: s.businessName, house_name: s.houseName, house_number: s.houseNumber,
+    road: s.road, eircode: s.eircode, search_tags: s.searchTags, has_dog: !!s.hasDog, safe_place: s.safePlace, notes: s.notes, lat: s.lat, lng: s.lng };
 }
 function toSection(r) { return { id: r.id, routeId: r.route_id, position: r.position, name: r.name, boxNumber: r.box_number }; }
 
@@ -395,7 +402,9 @@ class RouteIntelligence {
     if (this.cache.has(normalized)) return this.cache.get(normalized);
     let hit = null;
     try {
-      const { data } = await sb.rpc("lookup_correction", { p_route_id: this.routeId, p_normalized: normalized });
+      const { data } = this.token
+        ? await sb.rpc("lookup_correction_public", { p_token: this.token, p_normalized: normalized })
+        : await sb.rpc("lookup_correction", { p_route_id: this.routeId, p_normalized: normalized });
       if (data && data.length) hit = { stopId: data[0].stop_id, confidence: Number(data[0].confidence) };
     } catch (e) { console.warn("[RI] lookup failed", e); }
     this.cache.set(normalized, hit);
@@ -442,8 +451,16 @@ class RouteIntelligence {
     const n = normTranscript(transcript);
     this.cache.delete(n);
     this.learning.record(transcript, stopId, 0.9, "user-selected");
-    const { error } = await sb.rpc("record_correction", { p_route_id: this.routeId, p_stop_id: stopId, p_original: transcript, p_normalized: n, p_tags: tags });
-    if (error) throw error;
+    if (this.token && !stopId) return;   // relief link can't save free-typed names
+    this.cache.set(n, stopId ? { stopId, confidence: 0.95 } : null);
+    let res;
+    try {
+      res = this.token
+        ? await sb.rpc("record_correction_public", { p_token: this.token, p_stop_id: stopId, p_original: transcript, p_normalized: n })
+        : await sb.rpc("record_correction", { p_route_id: this.routeId, p_stop_id: stopId, p_original: transcript, p_normalized: n, p_tags: tags });
+    } catch (e) { res = { error: e }; }
+    if (res.error && typeof OFF !== "undefined" && OFF.isNetErr(res.error)) { OFF.push({ type: "correction", token: this.token, routeId: this.routeId, stopId, original: transcript, normalized: n, tags }); return; }
+    if (res.error) throw res.error;
   }
 }
 /* first RI result >= 0.8 that exists in the current search pool */
@@ -660,7 +677,14 @@ function openEditModal({ stop, section, isNew, onSaved, onClose }) {
       road: f.road || null, eircode: f.eircode || null
     };
     const btn = $("[data-save]", el); btn.disabled = true; $("span", btn).textContent = "Saving…";
-    const { data, error } = await sb.from("stops").update(row).eq("id", stop.id).select().single();
+    let data, error;
+    try { ({ data, error } = await sb.from("stops").update(row).eq("id", stop.id).select().single()); } catch (e) { error = e; }
+    if (error && OFF.isNetErr(error)) {
+      OFF.push({ type: "update", id: stop.id, row });
+      toast.success("Saved on this phone — will sync when there's signal");
+      document.removeEventListener("keydown", onKey); el.remove();
+      return onSaved(toStop({ ...fromStop(stop), ...row }));
+    }
     if (error) { toast.error("Save failed: " + error.message); btn.disabled = false; $("span", btn).textContent = "Save Changes"; return; }
     toast.success("Stop saved");
     document.removeEventListener("keydown", onKey); el.remove();
@@ -783,46 +807,157 @@ async function viewRoutes() {
   $("[data-logout]").onclick = async () => { await sb.auth.signOut(); location.hash = "#/"; };
 }
 
-/* ---------- Route view (port of RouteView.tsx) ---------- */
+/* =====================================================================
+   OFFLINE: cached route data + write queue
+   ===================================================================== */
+const OFF = {
+  key: "rl-queue",
+  get() { try { return JSON.parse(lsGet(this.key, "[]")); } catch { return []; } },
+  set(q) { lsSet(this.key, JSON.stringify(q)); OFF.badge(); },
+  push(op) { const q = this.get(); q.push({ ...op, at: Date.now() }); this.set(q); },
+  isNetErr(e) { return !navigator.onLine || /fetch|network|Failed to fetch|Load failed|NetworkError/i.test(String(e?.message || e)); },
+  badge() { const n = this.get().length, b = $("#rl-offline"); if (!b) return; b.style.display = !navigator.onLine || n ? "" : "none"; b.textContent = !navigator.onLine ? `Offline${n ? ` · ${n} change${n > 1 ? "s" : ""} waiting to sync` : " · working from saved route"}` : `Syncing ${n} change${n > 1 ? "s" : ""}…`; },
+  busy: false,
+  async flush() {
+    if (this.busy || !navigator.onLine || !sb) return;
+    let q = this.get(); if (!q.length) return;
+    this.busy = true;
+    try {
+      while (q.length) {
+        const op = q[0]; let res;
+        if (op.type === "update") res = await sb.from("stops").update(op.row).eq("id", op.id);
+        else if (op.type === "parcel") res = op.token ? await sb.rpc("log_parcel_public", { p_token: op.token, p_stop_id: op.stopId, p_count: op.count, p_via: op.via })
+                                                      : await sb.rpc("log_parcel", { p_stop_id: op.stopId, p_count: op.count, p_via: op.via });
+        else if (op.type === "unparcel") res = op.token ? await sb.rpc("delete_parcel_public", { p_token: op.token, p_parcel_id: op.parcelId })
+                                                        : await sb.from("parcels").delete().eq("id", op.parcelId);
+        else if (op.type === "correction") res = op.token ? await sb.rpc("record_correction_public", { p_token: op.token, p_stop_id: op.stopId, p_original: op.original, p_normalized: op.normalized })
+                                                          : await sb.rpc("record_correction", { p_route_id: op.routeId, p_stop_id: op.stopId, p_original: op.original, p_normalized: op.normalized, p_tags: op.tags || [] });
+        if (res?.error && this.isNetErr(res.error)) break;          // still offline → try later
+        if (res?.error) console.warn("[Sync] dropped op", op, res.error); // real error → drop it
+        q.shift(); this.set(q);
+      }
+      if (!q.length) toast.success("All changes synced");
+    } catch (e) { console.warn("[Sync]", e); }
+    finally { this.busy = false; this.badge(); }
+  }
+};
+window.addEventListener("online", () => { OFF.badge(); OFF.flush(); });
+window.addEventListener("offline", () => OFF.badge());
+setInterval(() => OFF.flush(), 30000);
+
+const todayStr = () => new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Dublin" });
+
+async function loadMemberBundle(routeId) {
+  const cacheKey = `rl-route-${routeId}`;
+  try {
+    const [{ data: route, error: e1 }, secRows, stopRows, canEditRes, parcelRes] = await Promise.all([
+      sb.from("routes").select("*").eq("id", routeId).maybeSingle(),
+      fetchAll("sections", { route_id: routeId }, ["position", "box_number"]),
+      fetchAll("stops", { route_id: routeId }, ["section_id", "stop_order"]),
+      sb.rpc("can_edit_route", { p_route: routeId }),
+      sb.from("parcels").select("id,stop_id,count,via,created_at").eq("route_id", routeId).eq("log_date", todayStr())
+    ]);
+    if (e1) throw e1;
+    if (!route) return null;
+    const b = { route, sections: secRows, stops: stopRows, canEdit: !!canEditRes?.data, parcels: parcelRes?.data || [], day: todayStr(), savedAt: Date.now() };
+    try { localStorage.setItem(cacheKey, JSON.stringify(b)); lsSet("rl-last-route", String(routeId)); } catch {}
+    return b;
+  } catch (e) {
+    const c = lsGet(cacheKey); if (!c) throw e;
+    const b = JSON.parse(c); b.offline = true; if (b.day !== todayStr()) b.parcels = [];
+    return b;
+  }
+}
+async function loadShareBundle(token) {
+  const cacheKey = `rl-share-${token}`;
+  try {
+    const [{ data, error }, p] = await Promise.all([sb.rpc("get_public_summary", { p_token: token }), sb.rpc("parcels_today_public", { p_token: token })]);
+    if (error) throw error;
+    if (!data) return null;
+    const b = { route: data.route, sections: data.sections, stops: data.stops, canEdit: false, parcels: p?.data || [], day: todayStr(), savedAt: Date.now() };
+    try { localStorage.setItem(cacheKey, JSON.stringify(b)); } catch {}
+    return b;
+  } catch (e) {
+    const c = lsGet(cacheKey); if (!c) throw e;
+    const b = JSON.parse(c); b.offline = true; if (b.day !== todayStr()) b.parcels = [];
+    return b;
+  }
+}
+
+/* Parcel phrase: "McGinley, one parcel" / "Rita McGinley two parcels" / "parcel for McGinley" */
+const NUMS = { a: 1, an: 1, one: 1, won: 1, two: 2, to: 2, too: 2, three: 3, four: 4, for: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+function parseParcel(t) {
+  const s = t.trim().replace(/[.!?]+$/, "");
+  let m = s.match(/^(.*?)[,\s]+(?:(\d+|a|an|one|won|two|to|too|three|four|for|five|six|seven|eight|nine|ten)\s+)?(?:parcels?|packets?|packages?|boxes)$/i);
+  if (m && m[1].trim()) return { name: m[1].trim(), count: m[2] ? (+m[2] || NUMS[m[2].toLowerCase()] || 1) : 1 };
+  m = s.match(/^(?:(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?(?:parcels?|packets?|packages?)\s+(?:for\s+)?(.+)$/i);
+  if (m && m[2].trim()) return { name: m[2].trim(), count: m[1] ? (+m[1] || NUMS[m[1].toLowerCase()] || 1) : 1 };
+  return null;
+}
+const countWord = n => ["", "One parcel", "Two parcels", "Three parcels", "Four parcels", "Five parcels"][n] || `${n} parcels`;
+
+function toastAction(msg, label, fn, ms = 6000) {
+  let box = $("#toasts"); const el = document.createElement("div");
+  el.className = "rl-toast rl-toast-success"; el.style.pointerEvents = "auto"; el.style.display = "flex"; el.style.gap = "12px"; el.style.alignItems = "center";
+  el.innerHTML = `<span>${esc(msg)}</span><button class="font-semibold text-primary underline">${esc(label)}</button>`;
+  box.appendChild(el);
+  $("button", el).onclick = () => { fn(); el.remove(); };
+  setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 300); }, ms);
+}
+
+/* =====================================================================
+   ROUTE VIEW (member) and RELIEF VIEW (share link) — same screen
+   ===================================================================== */
 async function viewRoute(routeId) {
   mount(spinner());
-  const [{ data: route, error: e1 }, secRows, stopRows, canEditRes] = await Promise.all([
-    sb.from("routes").select("*").eq("id", routeId).maybeSingle(),
-    fetchAll("sections", { route_id: routeId }, ["position", "box_number"]),
-    fetchAll("stops", { route_id: routeId }, ["section_id", "stop_order"]),
-    sb.rpc("can_edit_route", { p_route: routeId })
-  ]).catch(e => [{ error: e }]);
-  if (e1 || !route) { mount(`<div class="min-h-screen flex items-center justify-center"><div class="text-center"><p class="text-lg font-semibold">Route not found</p><p class="text-sm text-muted-foreground mt-1">You may not have access to this route.</p><a href="#/routes" class="text-xs text-primary underline mt-3 inline-block">My routes</a></div></div>`); return; }
+  let b;
+  try { b = await loadMemberBundle(routeId); } catch (e) { b = null; }
+  if (!b) { mount(`<div class="min-h-screen flex items-center justify-center"><div class="text-center px-4"><p class="text-lg font-semibold">Route not found</p><p class="text-sm text-muted-foreground mt-1">${navigator.onLine ? "You may not have access to this route." : "You're offline and this route hasn't been saved on this phone yet."}</p><a href="#/routes" class="text-xs text-primary underline mt-3 inline-block">My routes</a></div></div>`); return; }
+  renderRoute({ ...b, routeId, token: null });
+}
+async function viewShare(token) {
+  mount(`<div class="min-h-screen flex items-center justify-center bg-background"><p class="text-muted-foreground text-sm">Loading route…</p></div>`);
+  let b;
+  try { b = await loadShareBundle(token); } catch (e) { b = null; }
+  if (!b) { mount(`<div class="min-h-screen flex items-center justify-center bg-background px-4"><div class="text-center"><p class="text-lg font-semibold text-foreground">Route not found</p><p class="text-sm text-muted-foreground mt-1">This share link may be invalid or expired.</p></div></div>`); return; }
+  renderRoute({ ...b, routeId: b.route.id, token });
+}
+
+function renderRoute(B) {
+  const { route, routeId, token } = B, share = !!token;
   RI_CFG = { ...RI_DEFAULTS, ...(route.settings || {}) };
-  const sections = secRows.map(toSection);
-  let all = stopRows.map(toStop);
-  const canEdit = !!canEditRes?.data;
+  const sections = B.sections.map(toSection);
+  let all = B.stops.map(toStop);
+  const canEdit = !share && B.canEdit && !B.offlineEditsBlocked;
+  let parcels = (B.parcels || []).map(p => ({ id: p.id, stopId: p.stop_id ?? p.stopId, count: p.count }));
   const FT_KEY = "routelog:fieldTestMode";
   const S = {
-    sectionId: sections[0]?.id ?? 0, query: "", mode: "sorting", reorder: false,
-    fieldTest: lsGet(FT_KEY) === "true", voiceErr: null, lastCtx: null, searchStart: null, riPick: null
+    sectionId: sections[0]?.id ?? 0, query: "", mode: "sorting", reorder: false, parcelList: false,
+    fieldTest: !share && lsGet(FT_KEY) === "true", voiceErr: null, lastCtx: null, searchStart: null, riPick: null, pendingParcel: null
   };
-  const ri = new RouteIntelligence(routeId); ri.build(all);
+  const ri = new RouteIntelligence(routeId); ri.token = token; ri.build(all);
   const sectionStops = () => all.filter(s => s.sectionId === S.sectionId).sort((a, b) => a.stopOrder - b.stopOrder);
   const curSection = () => sections.find(x => x.id === S.sectionId);
   const pool = () => (S.mode === "delivery" ? sectionStops() : all);
+  const parcelCount = id => parcels.filter(p => p.stopId === id).reduce((n, p) => n + p.count, 0);
+  const secParcels = sid => parcels.reduce((n, p) => n + (all.find(s => s.id === p.stopId)?.sectionId === sid ? p.count : 0), 0);
+  const btnIcon = "p-2 rounded-full hover:bg-white/10 transition-colors";
 
   mount(`<div class="min-h-screen bg-background flex flex-col">
+    <div id="rl-offline" class="bg-amber-500 text-white text-xs font-semibold text-center py-1 px-3" style="display:none"></div>
     <header class="sticky top-0 z-20 bg-primary text-primary-foreground shadow-md no-print">
       <div class="flex items-center justify-between px-3 pt-3 pb-1.5">
         <div class="min-w-0"><h1 class="text-base font-display font-bold leading-tight">${esc(route.name)}</h1><p data-sub class="text-xs text-primary-foreground/70"></p></div>
         <div class="flex items-center gap-1">
-          ${canEdit ? `<button data-reorder title="Reorder stops" class="p-2 rounded-full transition-colors hover:bg-white/10">${icon("updown", 17)}</button>` : ""}
-          <a href="#/route/${routeId}/map" class="p-2 rounded-full hover:bg-white/10 transition-colors" title="Map view">${icon("map", 17)}</a>
-          <a href="#/route/${routeId}/print" class="p-2 rounded-full hover:bg-white/10 transition-colors" title="Print view">${icon("printer", 17)}</a>
-          <button data-export class="p-2 rounded-full hover:bg-white/10 transition-colors" title="Export learned mappings (JSON)">${icon("download", 17)}</button>
+          ${canEdit ? `<button data-reorder title="Reorder stops" class="${btnIcon}">${icon("updown", 17)}</button>` : ""}
+          ${share ? "" : `<a href="#/route/${routeId}/map" class="${btnIcon}" title="Map view">${icon("map", 17)}</a>
+          <a href="#/route/${routeId}/print" class="${btnIcon}" title="Print view">${icon("printer", 17)}</a>
+          <button data-export class="${btnIcon}" title="Export learned mappings (JSON)">${icon("download", 17)}</button>
           <button data-ft class="p-2 rounded-full transition-colors">${icon("flask", 17)}</button>
-          <a href="#/routes" data-home class="p-2 rounded-full hover:bg-white/10 transition-colors" title="All routes">${icon("route", 17)}</a>
+          <a href="#/routes" class="${btnIcon}" title="All routes">${icon("route", 17)}</a>`}
         </div>
       </div>
-      <div data-tabs class="flex gap-1.5 overflow-x-auto scrollbar-hide px-3 pb-2">
-        ${sections.map(x => `<button data-section-id="${x.id}" class="shrink-0 rounded-full px-3 py-1 text-xs font-semibold transition-all whitespace-nowrap">${x.boxNumber}. ${esc(x.name)}</button>`).join("")}
-      </div>
+      <div data-tabs class="flex gap-1.5 overflow-x-auto scrollbar-hide px-3 pb-2"></div>
       <div data-searchrow class="flex items-center gap-2 px-3 pb-2.5">
         <div class="relative flex-1">
           ${icon("search", 14, "absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground")}
@@ -839,11 +974,16 @@ async function viewRoute(routeId) {
       <p data-verr class="text-xs text-red-300 px-3 pb-1" style="display:none"></p>
     </header>
     <div data-boxready class="px-3 py-2.5 bg-accent/10 border-b border-accent/20" style="display:none"><p class="text-sm font-semibold text-accent-foreground"></p></div>
+    <div data-parcelbar class="px-3 py-2 bg-yellow-50 border-b border-yellow-200 flex items-center gap-2" style="display:none">
+      <p class="text-sm font-semibold text-yellow-900 flex-1"></p>
+      <button data-plist class="text-xs font-semibold px-3 py-1 rounded-full bg-yellow-500 text-white"></button>
+    </div>
     <div data-count class="px-3 py-2 text-xs text-muted-foreground no-print"></div>
     <main data-list class="flex-1 px-3 pb-6 space-y-2"></main>
     <p data-foot class="text-center text-xs text-muted-foreground/50 mt-2 pb-4 px-3"></p>
   </div>`);
   if (sessionStorage) sessionStorage.setItem("rl-stay", "1");
+  OFF.badge(); OFF.flush();
 
   const qEl = $("[data-q]"), listEl = $("[data-list]");
   let sortable = null;
@@ -870,8 +1010,27 @@ async function viewRoute(routeId) {
   }
   const ctx = (t, level, results) => ({ transcript: t, normalizedTranscript: normTranscript(t), matchLevel: level, matchResults: results, timestamp: Date.now() });
 
+  /* resolve a spoken name to exactly one stop (or null + results) */
+  async function resolve(t) {
+    const P = pool(); if (!P.length) return { stop: null, results: [], level: 0 };
+    if (RI_CFG.enabled !== false) {
+      try { const hit = pickConfident(await ri.search(t), P); if (hit) return { stop: hit, results: [hit], level: 3, ri: true }; }
+      catch (x) { console.warn("[RI] search failed, falling back:", x); }
+    }
+    const { level, results } = searchStops(P, t);
+    if (!results.length) return { stop: null, results, level };
+    if (level === 1 || level === 2) {
+      const n = exactCount(results, t);
+      if (n === 1) return { stop: exactFirst(results, t)[0], results, level };
+      if (n === 0 && results.length === 1) return { stop: results[0], results, level };
+      if (n === 0) return { stop: results[0], results, level, weak: true };
+      return { stop: null, results, level, multi: true };
+    }
+    return { stop: results.length === 1 ? results[0] : null, results, level };
+  }
+
   async function onTranscript(text, isFinal) {
-    S.query = text; qEl.value = text; S.riPick = null; drawList();
+    S.query = text; qEl.value = text; S.riPick = null; S.parcelList = false; drawList();
     if (!isFinal) return;
     const t = text.trim(); if (!t) return;
     if (S.fieldTest) S.searchStart = Date.now();
@@ -880,27 +1039,62 @@ async function viewRoute(routeId) {
       if (m) { const n = +m[1], sec = sections.find(x => x.boxNumber === n); if (sec) { selectSection(sec.id); speak(`Box ${n} ready. ${sec.name}.`); } else speak(`Box ${n} not found.`); return; }
       if (/^next\s+box$/i.test(t)) { const i = sections.findIndex(x => x.id === S.sectionId); if (i >= 0 && i < sections.length - 1) { const nx = sections[i + 1]; selectSection(nx.id); speak(`Box ${nx.boxNumber} ready. ${nx.name}.`); } else speak("No next box."); return; }
     }
-    const P = pool(); if (!P.length) return;
-    if (RI_CFG.enabled !== false) {
-      try {
-        const hit = pickConfident(await ri.search(t), P);
-        if (hit) { S.lastCtx = ctx(t, 3, [hit]); speak(callout(hit, spokenName(hit, matchStop(hit, t)))); return; }
-      } catch (x) { console.warn("[RI] Voice search failed, falling back:", x); }
+    /* ---- parcel logging by voice ---- */
+    const pp = S.mode !== "delivery" ? parseParcel(t) : null;
+    if (pp) {
+      S.query = pp.name; qEl.value = pp.name; drawList();
+      const r = await resolve(pp.name);
+      // one-word names ("McGinley") must be unique before we log a parcel against them
+      const oneWord = pp.name.split(/\s+/).filter(Boolean).length === 1;
+      const learned = r.ri && (await ri.lookupPersistent(normTranscript(pp.name)));
+      if (r.stop && oneWord && !learned && searchStops(pool(), pp.name).results.length > 1) { r.results = searchStops(pool(), pp.name).results; r.stop = null; }
+      S.lastCtx = ctx(pp.name, r.level, r.results);
+      if (r.stop && !r.weak) {
+        await logParcel(r.stop, pp.count, "voice");
+        speak(`${countWord(pp.count)}. ${spokenName(r.stop, matchStop(r.stop, pp.name)) || "Stop " + r.stop.stopOrder}. ${r.stop.road || ""}`.trim());
+      } else {
+        S.pendingParcel = { count: pp.count, until: Date.now() + 20000 };
+        drawList();
+        speak(r.results.length ? `Which ${pp.name}? Tap the house` : `No match for ${pp.name}`);
+      }
+      return;
     }
-    const { level, results } = searchStops(P, t), multi = t.split(/\s+/).filter(Boolean).length >= 2;
-    S.lastCtx = ctx(t, level, results);
-    if (!results.length) { speak(multi ? `No exact match found for ${t}` : `No match for ${t}`); openSaveNameModal({ transcript: t, stops: sectionStops(), onSave: saveName }); }
-    else if (level === 1 || level === 2) {
-      const n = exactCount(results, t);
-      if (n === 1) { const s = exactFirst(results, t)[0]; speak(callout(s, spokenName(s, matchStop(s, t)))); }
-      else if (n >= 2) { const w = t.trim().split(/\s+/); speak(`Multiple ${w[w.length - 1]} matches found`); }
-      else { const s = results[0]; speak(callout(s, spokenName(s, matchStop(s, t)))); }
-    } else if (S.mode === "delivery") { const s = results[0]; speak(callout(s, spokenName(s, matchStop(s, t)))); }
-    else speak("Closest matches shown");
+    const r = await resolve(t);
+    S.lastCtx = ctx(t, r.level, r.results);
+    const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
+    if (r.ri) return speak(callout(r.stop, spokenName(r.stop, matchStop(r.stop, t))));
+    if (!r.results.length) { speak(multiWord ? `No exact match found for ${t}` : `No match for ${t}`); openSaveNameModal({ transcript: t, stops: sectionStops(), onSave: saveName }); return; }
+    if (r.level === 1 || r.level === 2) {
+      if (r.multi) { const w = t.split(/\s+/); return speak(`Multiple ${w[w.length - 1]} matches found`); }
+      return speak(callout(r.stop, spokenName(r.stop, matchStop(r.stop, t))));
+    }
+    if (S.mode === "delivery") { const s = r.results[0]; return speak(callout(s, spokenName(s, matchStop(s, t)))); }
+    speak("Closest matches shown");
   }
   async function saveName(transcript, stopId, label) {
     await ri.recordCorrection(transcript, stopId || 0, stopId ? ["user-selected"] : []);
     toast.success(`Saved: "${transcript}" → ${label}`);
+  }
+
+  /* ---- parcels ---- */
+  async function logParcel(stop, count = 1, via = "tap") {
+    const tmp = { id: -Date.now(), stopId: stop.id, count };
+    parcels.push(tmp); drawHeader(); drawList();
+    let res;
+    try { res = token ? await sb.rpc("log_parcel_public", { p_token: token, p_stop_id: stop.id, p_count: count, p_via: via })
+                      : await sb.rpc("log_parcel", { p_stop_id: stop.id, p_count: count, p_via: via }); }
+    catch (e) { res = { error: e }; }
+    if (res.error && OFF.isNetErr(res.error)) { OFF.push({ type: "parcel", token, stopId: stop.id, count, via }); }
+    else if (res.error) { parcels = parcels.filter(p => p !== tmp); drawHeader(); drawList(); return toast.error("Couldn't log parcel: " + res.error.message); }
+    else tmp.id = res.data.id;
+    const name = stop.businessName || splitPipe(stop.residents)[0] || `Stop ${stop.stopOrder}`;
+    toastAction(`📦 ${count} × ${name}`, "Undo", () => undoParcel(tmp));
+  }
+  async function undoParcel(p) {
+    parcels = parcels.filter(x => x !== p); drawHeader(); drawList();
+    if (p.id < 0) { OFF.set(OFF.get().filter(op => !(op.type === "parcel" && op.stopId === p.stopId && op.count === p.count))); return; }
+    const res = token ? await sb.rpc("delete_parcel_public", { p_token: token, p_parcel_id: p.id }) : await sb.from("parcels").delete().eq("id", p.id);
+    if (res.error && OFF.isNetErr(res.error)) OFF.push({ type: "unparcel", token, parcelId: p.id });
   }
 
   /* ---- drawing ---- */
@@ -911,19 +1105,21 @@ async function viewRoute(routeId) {
     b.className = `shrink-0 p-2 rounded-full transition-all ${on ? "bg-red-500 text-white animate-pulse" : st === "speaking" ? "bg-accent text-accent-foreground animate-pulse" : "bg-white/20 text-primary-foreground hover:bg-white/30"}`;
     b.innerHTML = icon(on ? "micOff" : "mic", 16);
   }
+  function drawTabs() {
+    $("[data-tabs]").innerHTML = sections.map(x => {
+      const on = x.id === S.sectionId, n = secParcels(x.id);
+      return `<button data-section-id="${x.id}" class="shrink-0 rounded-full px-3 py-1 text-xs font-semibold transition-all whitespace-nowrap ${on ? "bg-accent text-accent-foreground shadow" : "bg-white/10 text-primary-foreground hover:bg-white/20"}">${x.boxNumber}. ${esc(x.name)}${n ? ` · 📦${n}` : ""}</button>`;
+    }).join("");
+  }
   function drawHeader() {
     const sec = curSection();
-    $("[data-sub]").textContent = sec ? `Box ${sec.boxNumber} · ${sec.name}` : "No sections yet";
-    $$("[data-section-id]").forEach(b => {
-      const on = +b.dataset.sectionId === S.sectionId;
-      b.className = `shrink-0 rounded-full px-3 py-1 text-xs font-semibold transition-all whitespace-nowrap ${on ? "bg-accent text-accent-foreground shadow" : "bg-white/10 text-primary-foreground hover:bg-white/20"}`;
-    });
+    $("[data-sub]").textContent = (share ? "Relief view · " : "") + (sec ? `Box ${sec.boxNumber} · ${sec.name}` : "No sections yet");
+    drawTabs();
     $$("[data-mode]").forEach(b => {
       b.className = `flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all ${S.mode === b.dataset.mode ? "bg-accent text-accent-foreground shadow" : "bg-white/10 text-primary-foreground hover:bg-white/20"}`;
     });
     const ft = $("[data-ft]");
-    ft.title = S.fieldTest ? "Field test logging: ON — tap to disable" : "Field test logging: OFF — tap to enable";
-    ft.className = `p-2 rounded-full transition-colors ${S.fieldTest ? "bg-accent text-accent-foreground" : "hover:bg-white/10"}`;
+    if (ft) { ft.title = S.fieldTest ? "Field test logging: ON — tap to disable" : "Field test logging: OFF — tap to enable"; ft.className = `p-2 rounded-full transition-colors ${S.fieldTest ? "bg-accent text-accent-foreground" : "hover:bg-white/10"}`; }
     const ro = $("[data-reorder]");
     if (ro) { ro.title = S.reorder ? "Exit reorder mode" : "Reorder stops"; ro.className = `p-2 rounded-full transition-colors ${S.reorder ? "bg-accent text-accent-foreground" : "hover:bg-white/10"}`; }
     $("[data-searchrow]").style.display = S.reorder ? "none" : "";
@@ -932,19 +1128,31 @@ async function viewRoute(routeId) {
     const ve = $("[data-verr]"); ve.style.display = S.voiceErr && !S.reorder ? "" : "none"; ve.textContent = S.voiceErr || "";
     const br = $("[data-boxready]"); br.style.display = S.mode === "delivery" && sec ? "" : "none";
     if (sec) $("p", br).textContent = `📍 Box ${sec.boxNumber} Ready — ${sec.name}`;
+    const pb = $("[data-parcelbar]"), total = parcels.reduce((n, p) => n + p.count, 0), houses = new Set(parcels.map(p => p.stopId)).size;
+    pb.style.display = S.mode === "parcel" && !S.reorder ? "" : "none";
+    $("p", pb).textContent = total ? `📦 ${total} parcel${total > 1 ? "s" : ""} today · ${houses} house${houses > 1 ? "s" : ""}` : "📦 No parcels logged yet today — say “McGinley, one parcel” or tap a house";
+    $("[data-plist]").textContent = S.parcelList ? "Back to box" : "Today's list";
+    $("[data-plist]").style.display = total ? "" : "none";
     drawMic();
   }
   function listToShow() {
+    if (S.parcelList) {
+      const ids = new Set(parcels.map(p => p.stopId)), pos = id => sections.findIndex(x => x.id === id);
+      return all.filter(s => ids.has(s.id)).sort((a, b) => pos(a.sectionId) - pos(b.sectionId) || a.stopOrder - b.stopOrder);
+    }
     const base = sectionStops(), q = S.query.trim();
     if (S.reorder || !q) return base;
     const P = pool(), r = exactFirst(searchStops(P, q).results, S.query);
     return S.riPick && !r.some(x => x.id === S.riPick.id) ? [S.riPick, ...r] : r;
   }
   const addBtn = (label, after) => `<button data-insert="${after}" class="w-full flex items-center justify-center gap-1.5 py-1 my-0.5 rounded-lg border border-dashed border-primary/25 text-primary/60 text-xs font-semibold hover:border-primary/60 hover:text-primary hover:bg-primary/5 transition-all disabled:opacity-40">${icon("plus", 12)}${label}</button>`;
+  const parcelBadge = s => { const n = parcelCount(s.id); return n ? `<div class="mb-1"><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-yellow-400 text-yellow-950">📦 ${n} today</span></div>` : ""; };
   function drawList() {
-    const q = S.query.trim(), searching = q.length > 0 && !S.reorder, items = listToShow(), base = sectionStops(), P = pool();
+    const q = S.query.trim(), searching = q.length > 0 && !S.reorder && !S.parcelList, items = listToShow(), base = sectionStops(), P = pool();
+    const tapMode = S.mode === "parcel" || (S.pendingParcel && S.pendingParcel.until > Date.now());
     $("[data-clear]").style.display = S.query ? "" : "none";
-    $("[data-count]").textContent = S.reorder ? `${base.length} stops — drag to reorder`
+    $("[data-count]").textContent = S.parcelList ? `${items.length} houses with parcels today, in delivery order`
+      : S.reorder ? `${base.length} stops — drag to reorder`
       : searching ? `${items.length} of ${P.length} stops ${S.mode === "delivery" ? "in this box" : "across route"} matching "${S.query}"`
       : `${base.length} stops in this section`;
     if (sortable) { sortable.destroy(); sortable = null; }
@@ -959,16 +1167,20 @@ async function viewRoute(routeId) {
         </div>${addBtn(i === items.length - 1 ? "Add stop at end" : "Insert here", s.stopOrder)}</div>`).join("") + `</div>`;
       if (window.Sortable) sortable = Sortable.create($("[data-sortable]", listEl), { handle: "[data-handle]", animation: 150, delay: 0, onEnd: onDragEnd });
     } else {
-      listEl.innerHTML = items.map(s => {
-        const sec = searching ? sections.find(x => x.id === s.sectionId) : null;
-        return `<div>${sec ? `<p class="text-xs font-semibold text-primary/60 px-1 pt-1 pb-0.5">Box ${sec.boxNumber} · ${esc(sec.name)}</p>` : ""}${stopCardHTML(s, S.query, canEdit)}</div>`;
-      }).join("");
+      let lastSec = null;
+      listEl.innerHTML = (S.pendingParcel && S.pendingParcel.until > Date.now() ? `<p class="text-sm font-semibold text-yellow-900 bg-yellow-100 border border-yellow-300 rounded-lg px-3 py-2">Tap the right house to log ${S.pendingParcel.count} parcel${S.pendingParcel.count > 1 ? "s" : ""}</p>` : "") +
+        items.map(s => {
+          let head = "";
+          if (searching || S.parcelList) { const sec = sections.find(x => x.id === s.sectionId); if (sec && (!S.parcelList || sec.id !== lastSec)) head = `<p class="text-xs font-semibold text-primary/60 px-1 pt-1 pb-0.5">Box ${sec.boxNumber} · ${esc(sec.name)}</p>`; lastSec = sec?.id; }
+          return `<div>${head}${parcelBadge(s)}${stopCardHTML(s, S.parcelList ? "" : S.query, canEdit || tapMode)}</div>`;
+        }).join("");
+      if (tapMode) $$(".stop-card [class*='text-[10px]']", listEl).forEach(e => (e.textContent = S.mode === "parcel" ? "tap to add a parcel" : "tap to log parcel"));
     }
-    $("[data-foot]").textContent = S.reorder ? "" : searching ? (S.mode === "delivery" ? `Searching ${P.length} stops in this box` : `Searching all ${P.length} stops across the route`)
-      : curSection() && canEdit ? "Tap ⇅ to enter reorder mode and insert stops at any position" : "";
+    $("[data-foot]").textContent = S.reorder || S.parcelList ? "" : searching ? (S.mode === "delivery" ? `Searching ${P.length} stops in this box` : `Searching all ${P.length} stops across the route`)
+      : S.mode === "parcel" ? "Parcel mode: tap a house or say “name, one parcel”" : curSection() && canEdit ? "Tap ⇅ to enter reorder mode and insert stops at any position" : "";
   }
   function selectSection(id) {
-    S.sectionId = id; S.query = ""; qEl.value = ""; S.riPick = null; window.speechSynthesis?.cancel();
+    S.sectionId = id; S.query = ""; qEl.value = ""; S.riPick = null; S.parcelList = false; window.speechSynthesis?.cancel();
     $(`[data-section-id="${id}"]`)?.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
     drawHeader(); drawList();
   }
@@ -987,11 +1199,11 @@ async function viewRoute(routeId) {
     ids.forEach((id, i) => { const s = all.find(x => x.id === id); if (s) s.stopOrder = i + 1; });
     drawList();
     const { error } = await sb.rpc("reorder_stops", { p_section_id: S.sectionId, p_ordered_ids: ids });
-    if (error) { toast.error("Reorder failed — refreshing"); viewRoute(routeId); }
+    if (error) { toast.error(OFF.isNetErr(error) ? "Reordering needs signal — try again when online" : "Reorder failed — refreshing"); viewRoute(routeId); }
   }
   async function insertAfter(after) {
     const { data, error } = await sb.rpc("insert_stop", { p_section_id: S.sectionId, p_after_order: after });
-    if (error || !data) return toast.error("Could not add stop");
+    if (error || !data) return toast.error(error && OFF.isNetErr(error) ? "Adding stops needs signal" : "Could not add stop");
     all.forEach(s => { if (s.sectionId === S.sectionId && s.stopOrder > after) s.stopOrder++; });
     const ns = toStop(data); all.push(ns); drawList();
     openEdit(ns, true);
@@ -1000,24 +1212,37 @@ async function viewRoute(routeId) {
     const s = all.find(x => x.id === id); if (!s) return;
     if (!silent && !(await confirmDialog("Delete this stop?", `This action cannot be undone. Stop ${s.stopOrder} will be permanently removed from the route.`))) return;
     const { error } = await sb.rpc("delete_stop", { p_id: id });
-    if (error) return toast.error("Delete failed: " + error.message);
+    if (error) return toast.error(OFF.isNetErr(error) ? "Deleting needs signal" : "Delete failed: " + error.message);
     all = all.filter(x => x.id !== id);
     all.forEach(x => { if (x.sectionId === s.sectionId && x.stopOrder > s.stopOrder) x.stopOrder--; });
     ri.build(all); drawList();
+  }
+  function cacheStops() {
+    try { const k = `rl-route-${routeId}`, c = JSON.parse(lsGet(k) || "null"); if (c) { c.stops = all.map(fromStop); localStorage.setItem(k, JSON.stringify(c)); } } catch {}
   }
   function openEdit(stop, isNew = false) {
     let saved = false;
     openEditModal({
       stop, section: sections.find(x => x.id === stop.sectionId) || curSection(), isNew,
-      onSaved: ns => { saved = true; all = all.map(x => (x.id === ns.id ? ns : x)); ri.build(all); drawList(); },
+      onSaved: ns => { saved = true; all = all.map(x => (x.id === ns.id ? ns : x)); ri.build(all); cacheStops(); drawList(); },
       onClose: () => { if (isNew && !saved) deleteStop(stop.id, true); }
     });
   }
+  // Learn only real mishearings: if the tapped house already matched what was heard
+  // (e.g. "McGinley" and there are 6 McGinleys), there's nothing to learn.
+  const shouldLearn = (c, stop) => !!(c && c.transcript) && !(stopMatches(stop, c.transcript) && (c.matchResults || []).some(x => x.id === stop.id));
   function onTap(stop) {
+    if (S.mode === "parcel" || (S.pendingParcel && S.pendingParcel.until > Date.now())) {
+      const n = S.pendingParcel?.until > Date.now() ? S.pendingParcel.count : 1;
+      const c0 = S.lastCtx;
+      if (S.pendingParcel && c0 && Date.now() - c0.timestamp <= 20000 && shouldLearn(c0, stop)) ri.recordCorrection(c0.transcript, stop.id).catch(() => {});
+      S.pendingParcel = null;
+      return logParcel(stop, n, "tap");
+    }
     const c = S.lastCtx;
-    if (c && Date.now() - c.timestamp <= 10000) {
+    if (c && Date.now() - c.timestamp <= 10000 && shouldLearn(c, stop)) {
       ri.recordCorrection(c.transcript, stop.id).catch(x => console.warn("[Learning] Failed to record correction:", x));
-      if (S.fieldTest && S.searchStart) {
+      if (S.fieldTest && S.searchStart && !share) {
         sb.from("search_events").insert({
           route_id: routeId, section_id: S.sectionId, original_transcript: c.transcript, normalized_transcript: c.normalizedTranscript,
           learned_mapping_used: false, fuzzy_matching_used: c.matchLevel === 3,
@@ -1027,6 +1252,7 @@ async function viewRoute(routeId) {
         }).then(({ error }) => error && console.warn("[FieldTest] log failed", error));
         S.searchStart = null;
       }
+      S.lastCtx = null;
     }
     if (canEdit) openEdit(stop);
   }
@@ -1045,11 +1271,12 @@ async function viewRoute(routeId) {
   $("[data-tabs]").onclick = e => { const b = e.target.closest("[data-section-id]"); if (b) { S.reorder = false; selectSection(+b.dataset.sectionId); } };
   $("[data-modes]").onclick = e => {
     const b = e.target.closest("[data-mode]"); if (!b) return;
-    S.mode = b.dataset.mode; S.query = ""; S.riPick = null; qEl.value = ""; window.speechSynthesis?.cancel();
+    S.mode = b.dataset.mode; S.query = ""; S.riPick = null; S.parcelList = false; S.pendingParcel = null; qEl.value = ""; window.speechSynthesis?.cancel();
     if (S.mode === "delivery" && sections[0]) S.sectionId = sections[0].id;
     drawHeader(); drawList();
   };
-  qEl.oninput = () => { S.query = qEl.value; S.riPick = null; drawList(); riVisual(); };
+  $("[data-plist]").onclick = () => { S.parcelList = !S.parcelList; S.query = ""; qEl.value = ""; drawHeader(); drawList(); window.scrollTo(0, 0); };
+  qEl.oninput = () => { S.query = qEl.value; S.riPick = null; S.parcelList = false; drawList(); riVisual(); };
   $("[data-clear]").onclick = () => { S.query = ""; qEl.value = ""; S.riPick = null; window.speechSynthesis?.cancel(); drawList(); };
   $("[data-mic]").onpointerdown = () => {
     voice.prime();
@@ -1058,9 +1285,9 @@ async function viewRoute(routeId) {
   };
   const unlock = () => { try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; window.speechSynthesis.speak(u); } catch {} };
   $("[data-audio]").onpointerdown = unlock; $("[data-audio]").onclick = unlock;
-  $("[data-ft]").onclick = () => { S.fieldTest = !S.fieldTest; lsSet(FT_KEY, String(S.fieldTest)); toast.success(S.fieldTest ? "Field test logging enabled" : "Field test logging disabled"); drawHeader(); };
-  $("[data-export]").onclick = exportMappings;
-  const ro = $("[data-reorder]"); if (ro) ro.onclick = () => { S.reorder = !S.reorder; S.query = ""; qEl.value = ""; drawHeader(); drawList(); };
+  const ftb = $("[data-ft]"); if (ftb) ftb.onclick = () => { S.fieldTest = !S.fieldTest; lsSet(FT_KEY, String(S.fieldTest)); toast.success(S.fieldTest ? "Field test logging enabled" : "Field test logging disabled"); drawHeader(); };
+  const exb = $("[data-export]"); if (exb) exb.onclick = exportMappings;
+  const ro = $("[data-reorder]"); if (ro) ro.onclick = () => { S.reorder = !S.reorder; S.query = ""; qEl.value = ""; S.parcelList = false; drawHeader(); drawList(); };
   listEl.addEventListener("click", e => {
     const ins = e.target.closest("[data-insert]"); if (ins) { ins.disabled = true; return insertAfter(+ins.dataset.insert); }
     const del = e.target.closest("[data-del]"); if (del) return deleteStop(+del.dataset.del);
@@ -1070,39 +1297,9 @@ async function viewRoute(routeId) {
   });
   listEl.addEventListener("keydown", e => { if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-stop-id][role=button]")) e.target.click(); });
 
-  if (location.search.includes("debug")) window.rlSay = onTranscript; // lets you test voice flow by typing rlSay('rita mcginley', true) in the console
+  if (location.search.includes("debug")) window.rlSay = onTranscript; // test voice flow: rlSay('rita mcginley', true)
   drawHeader(); drawList();
   cleanup = () => { voice.destroy(); window.speechSynthesis?.cancel(); if (sortable) sortable.destroy(); };
-}
-
-/* ---------- Share view (port of ShareView.tsx) ---------- */
-async function viewShare(token) {
-  mount(`<div class="min-h-screen flex items-center justify-center bg-background"><p class="text-muted-foreground text-sm">Loading route…</p></div>`);
-  const { data, error } = await sb.rpc("get_public_summary", { p_token: token });
-  if (error || !data) { mount(`<div class="min-h-screen flex items-center justify-center bg-background px-4"><div class="text-center"><p class="text-lg font-semibold text-foreground">Route not found</p><p class="text-sm text-muted-foreground mt-1">This share link may be invalid or expired.</p></div></div>`); return; }
-  const sections = data.sections.map(toSection), stops = data.stops.map(toStop);
-  let cur = sections[0]?.id ?? 0, q = "";
-  mount(`<div class="min-h-screen bg-background flex flex-col">
-    <header class="bg-primary text-primary-foreground sticky top-0 z-30 shadow-md">
-      <div class="px-3 py-2.5"><h1 class="text-lg font-bold">${esc(data.route.name)}</h1><p class="text-xs opacity-75">Substitute / Relief View — Read Only</p></div>
-      <div data-tabs class="flex gap-1.5 overflow-x-auto scrollbar-hide px-3 pb-2">${sections.map(M => `<button data-section-id="${M.id}" class="shrink-0 rounded-full px-3 py-1 text-xs font-semibold transition-all whitespace-nowrap">${M.boxNumber}. ${esc(M.name)}</button>`).join("")}</div>
-      <div class="flex items-center gap-2 px-3 pb-2.5"><div class="relative flex-1">${icon("search", 14, "absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground")}
-        <input data-q type="text" placeholder="Search residents, aliases…" class="w-full pl-8 pr-8 py-1.5 rounded-full text-sm bg-white text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-accent">
-        <button data-clear class="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" style="display:none">${icon("x", 14)}</button></div></div>
-    </header>
-    <div data-count class="px-3 py-2 text-xs text-muted-foreground"></div>
-    <main data-list class="flex-1 px-3 pb-6 space-y-2"></main></div>`);
-  const draw = () => {
-    $$("[data-section-id]").forEach(b => (b.className = `shrink-0 rounded-full px-3 py-1 text-xs font-semibold transition-all whitespace-nowrap ${+b.dataset.sectionId === cur ? "bg-accent text-accent-foreground shadow" : "bg-white/10 text-primary-foreground hover:bg-white/20"}`));
-    const S = stops.filter(M => M.sectionId === cur).sort((a, b) => a.stopOrder - b.stopOrder), E = q.trim() ? S.filter(M => stopMatches(M, q.trim())) : S;
-    $("[data-count]").textContent = `${E.length} of ${S.length} stops`;
-    $("[data-clear]").style.display = q ? "" : "none";
-    $("[data-list]").innerHTML = E.length ? E.map(M => stopCardHTML(M, q)).join("") : `<div class="text-center py-12 text-muted-foreground"><p class="text-sm">No stops found</p></div>`;
-  };
-  $("[data-tabs]").onclick = e => { const b = e.target.closest("[data-section-id]"); if (b) { cur = +b.dataset.sectionId; q = ""; $("[data-q]").value = ""; draw(); } };
-  $("[data-q]").oninput = e => { q = e.target.value; draw(); };
-  $("[data-clear]").onclick = () => { q = ""; $("[data-q]").value = ""; draw(); };
-  draw();
 }
 
 /* ---------- Map view (port of MapView.tsx) ---------- */
@@ -1177,10 +1374,18 @@ async function viewPrint(routeId) {
    ROUTER
    ===================================================================== */
 async function loadProfile() {
-  const { data: { session } } = await sb.auth.getSession();
+  let session = null;
+  try { ({ data: { session } } = await sb.auth.getSession()); } catch {}
   state.user = session?.user ?? null;
   state.profile = null;
-  if (state.user) { const { data } = await sb.from("profiles").select("*").eq("id", state.user.id).maybeSingle(); state.profile = data; }
+  if (state.user) {
+    lsSet("rl-user", JSON.stringify({ id: state.user.id, email: state.user.email }));
+    try { const { data } = await sb.from("profiles").select("*").eq("id", state.user.id).maybeSingle(); state.profile = data; if (data) lsSet("rl-profile", JSON.stringify(data)); }
+    catch { try { state.profile = JSON.parse(lsGet("rl-profile") || "null"); } catch {} }
+  } else if (!navigator.onLine && lsGet("rl-user")) {
+    // offline with an expired session: keep working from the saved route
+    try { state.user = JSON.parse(lsGet("rl-user")); state.profile = JSON.parse(lsGet("rl-profile") || "null"); state.offlineUser = true; } catch {}
+  }
 }
 async function router() {
   if (!sb) return viewSetup();
@@ -1200,11 +1405,13 @@ async function router() {
     if (parts[2] === "print") return viewPrint(id);
     return viewRoute(id);
   }
-  if (parts[0] === "routes") return viewRoutes();
+  if (parts[0] === "routes") return navigator.onLine || !lsGet("rl-last-route") ? viewRoutes() : viewRoute(+lsGet("rl-last-route"));
   location.replace("#/routes");
 }
 window.addEventListener("hashchange", router);
 if (sb) sb.auth.onAuthStateChange(ev => { if (ev === "PASSWORD_RECOVERY") location.hash = "#/newpass"; });
+if (sb) sb.auth.onAuthStateChange(ev => { if (ev === "SIGNED_OUT") ["rl-user", "rl-profile"].forEach(k => { try { localStorage.removeItem(k); } catch {} }); });
+if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(e => console.warn("[SW]", e));
 router();
 
 </script>
