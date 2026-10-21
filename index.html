@@ -1600,6 +1600,8 @@ async function router() {
   if (!sb) return viewSetup();
   const h = location.hash.replace(/^#/, "") || "/";
   const parts = h.split("/").filter(Boolean);
+  const qsRelief = new URLSearchParams(location.search).get("relief");   // ?relief=TOKEN survives apps that drop the #part
+  if (qsRelief) return viewShare(qsRelief);
   if (parts[0] === "share" && parts[1]) return viewShare(parts[1]);
   if (parts[0] === "newpass") return viewLogin("newpass");
   await loadProfile();

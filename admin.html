@@ -547,7 +547,7 @@ const btnPrimary = `${btn} bg-primary text-primary-foreground hover:opacity-90`;
 const btnOutline = `${btn} border border-border bg-background hover:bg-muted text-foreground`;
 const btnDanger = `${btn} bg-destructive/10 text-destructive border border-destructive/30 hover:bg-destructive/20`;
 const appUrl = () => new URL("index.html", location.href).href.replace(/index\.html$/, "");
-const shareUrl = t => `${appUrl()}#/share/${t}`;
+const shareUrl = t => `${appUrl()}?relief=${t}`;
 const fmtDate = d => (d ? new Date(d).toLocaleString("en-IE", { dateStyle: "medium", timeStyle: "short" }) : "—");
 
 /* ---------- CSV ---------- */
