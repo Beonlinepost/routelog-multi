@@ -2,7 +2,7 @@
    App pages: network first, fall back to the saved copy.
    Libraries/fonts: saved copy first. Database calls are never cached here
    (the app keeps its own saved copy of each route). */
-const CACHE = "routelog-v8";
+const CACHE = "routelog-v9";
 const SHELL = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js",
   "https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"];
@@ -18,7 +18,7 @@ self.addEventListener("fetch", e => {
   if (req.method !== "GET" || url.hostname.endsWith("supabase.co")) return;
   const isPage = req.mode === "navigate" || (url.origin === location.origin && /\.(html|json)$|\/$/.test(url.pathname));
   if (isPage) {
-    e.respondWith(fetch(req).then(r => { const cp = r.clone(); caches.open(CACHE).then(c => c.put(req.mode === "navigate" ? "./index.html" : req, cp)); return r; })
+    e.respondWith(fetch(req.url, { cache: "no-cache", credentials: "same-origin" }).then(r => { const cp = r.clone(); caches.open(CACHE).then(c => c.put(req.mode === "navigate" ? "./index.html" : req, cp)); return r; })
       .catch(() => caches.match(req).then(m => m || caches.match("./index.html"))));
     return;
   }
