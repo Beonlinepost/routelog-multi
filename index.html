@@ -551,7 +551,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-function sayable(t) { return String(t || "").replace(/\bMc ?(?=[A-Z])/g, "Mac ").replace(/\bMAC ?(?=[A-Z])/g, "Mac ").replace(/\|/g, ","); }
+function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
   if (_voice) return _voice;
