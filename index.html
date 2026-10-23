@@ -423,7 +423,7 @@ class RouteIntelligence {
   }
   add(term, stopId, map) {
     const key = this.normalize(term); if (!key) return;
-    if (!map.has(key)) map.set(key, { phonetic: metaphone(term)[0], stopIds: [] });
+    if (!map.has(key)) map.set(key, { phonetic: metaphone(term)[0], label: term, stopIds: [] });
     const e = map.get(key); if (!e.stopIds.includes(stopId)) e.stopIds.push(stopId);
   }
   normalize(r) {
@@ -492,17 +492,27 @@ class RouteIntelligence {
       [this.index.roads, 0.8], ...(RI_CFG.enableAliasMatching !== false ? [[this.index.aliases, 0.92]] : []), [this.index.tags, 0.75]
     ];
     const [g] = metaphone(raw); let fuzzyCount = 0;
+    // Compare first name with first name and surname with surname, so "Eileen Devaney" can't land on "Alan Duffy"
+    const words = x => String(x || "").toLowerCase().replace(/[^a-z'\s]/g, " ").split(/\s+/).filter(Boolean).map(w => w.replace(/^mc/, "mac").replace(/'/g, ""));
+    const rw = words(raw);
+    const wordScore = (E, M) => {
+      const lw = words(E.label);
+      if (rw.length >= 2 && lw.length >= 2) { const last = rw[rw.length - 1]; return (confidence(rw[0], lw[0]) + Math.max(...lw.slice(1).map(x => x === last ? 1 : confidence(last, x)))) / 2; }
+      return confidence(o, M);
+    };
     idx.forEach(([map, prio]) => {
       map.forEach((E, M) => {
         if (M === o) { E.stopIds.forEach(T => { if (!out.has(T)) out.set(T, { stopId: T, confidence: 0.98, matchType: "exact", term: M }); }); return; }
         const w = metaSim(raw, M);
         if (w >= 0.85 || (g && E.phonetic && g === E.phonetic)) {
-          E.stopIds.forEach(T => { if (!out.has(T)) out.set(T, { stopId: T, confidence: Math.min(0.9, w * prio), matchType: "phonetic", term: M }); });
+          const c = Math.min(0.95, prio * (0.25 * w + 0.75 * wordScore(E, M)));
+          E.stopIds.forEach(T => { const prev = out.get(T); if (!prev || (prev.matchType !== "exact" && prev.matchType !== "learned" && prev.confidence < c)) out.set(T, { stopId: T, confidence: c, matchType: "phonetic", term: M }); });
           return;
         }
         const R = confidence(raw, M);
         if (R >= threshold && fuzzyCount < (RI_CFG.maxFuzzyResults ?? 10) * 5) {
-          E.stopIds.forEach(T => { if (!out.has(T)) { fuzzyCount++; out.set(T, { stopId: T, confidence: R * prio, matchType: "fuzzy", term: M }); } });
+          const c = prio * Math.min(R, wordScore(E, M));
+          E.stopIds.forEach(T => { const prev = out.get(T); if (!prev) { fuzzyCount++; out.set(T, { stopId: T, confidence: c, matchType: "fuzzy", term: M }); } else if (prev.matchType === "fuzzy" && prev.confidence < c) prev.confidence = c; });
         }
       });
     });
@@ -527,13 +537,12 @@ class RouteIntelligence {
 }
 /* first RI result >= 0.8 that exists in the current search pool */
 function pickConfident(results, pool) {
-  for (const r of results) {
-    if (r.confidence < 0.8) break;
-    if (!r.stopId || r.stopId <= 0) continue;
-    const s = pool.find(o => o.id === r.stopId);
-    if (s) return s;
-  }
-  return null;
+  const inPool = results.filter(r => r.stopId > 0 && pool.some(o => o.id === r.stopId));
+  const [a, b] = inPool;
+  if (!a || a.confidence < 0.8) return null;
+  // learned and exact hits always win; a guess must be clearly ahead of the next house
+  if (!/learned|exact/.test(a.matchType || "") && b && a.confidence - b.confidence < 0.08) return null;
+  return pool.find(o => o.id === a.stopId);
 }
 
 /* =====================================================================
