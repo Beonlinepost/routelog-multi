@@ -542,6 +542,8 @@ function pickConfident(results, pool) {
   if (!a || a.confidence < 0.8) return null;
   // learned and exact hits always win; a guess must be clearly ahead of the next house
   if (!/learned|exact/.test(a.matchType || "") && b && a.confidence - b.confidence < 0.08) return null;
+  // several houses equally right (e.g. just "Eileen", or two Joe Duffys) → show the list
+  if (!/learned/.test(a.matchType || "") && b && b.stopId !== a.stopId && b.confidence >= a.confidence - 0.001) return null;
   return pool.find(o => o.id === a.stopId);
 }
 
