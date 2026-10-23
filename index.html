@@ -551,11 +551,13 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
+function sayable(t) { return String(t || "").replace(/\bMc ?(?=[A-Z])/g, "Mac ").replace(/\bMAC ?(?=[A-Z])/g, "Mac ").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
   if (_voice) return _voice;
   const vs = window.speechSynthesis.getVoices() || []; if (!vs.length) return null;
-  const by = l => vs.find(v => v.lang && v.lang.replace("_", "-").toLowerCase().startsWith(l));
+  const good = v => /premium|enhanced|siri|neural|natural/i.test((v.name || "") + " " + (v.voiceURI || ""));
+  const by = l => { const m = vs.filter(v => v.lang && v.lang.replace("_", "-").toLowerCase().startsWith(l)); return m.find(good) || m[0]; };
   _voice = by("en-ie") || by("en-gb") || by("en-us") || by("en") || null;
   return _voice;
 }
@@ -579,9 +581,10 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       let interim = "", fin = "";
       for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; e.results[i].isFinal ? (fin += t) : (interim += t); }
       if (interim) { lastInterim = interim; onTranscript(interim, false);
-        // iPhone Safari often never sends a "final" result — if the words stop changing for 1.2s, use them
-        clearTimeout(silenceTimer); silenceTimer = setTimeout(() => { finishInterim("pause"); try { rec.stop(); } catch {} }, 1200); }
-      if (fin) { clearTimeout(silenceTimer); gotFinal = true; lastInterim = ""; vlog("Final transcript", fin); onTranscript(fin, true); }
+        // iPhone Safari often never sends a "final" result — if the words stop changing for 0.75s, use them
+        clearTimeout(silenceTimer); silenceTimer = setTimeout(() => { finishInterim("pause"); try { rec.stop(); } catch {} }, 750); }
+      if (fin && gotFinal) { vlog("Late final ignored", fin); }
+      else if (fin) { clearTimeout(silenceTimer); gotFinal = true; lastInterim = ""; vlog("Final transcript", fin); onTranscript(fin, true); }
     };
     rec.onend = () => {
       finishInterim("end");
@@ -609,7 +612,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     speakingEnd(len = 0) {
       clear();
       const ios = /iPad|iPhone|iPod/.test(navigator.userAgent), mobile = ios || /Android/i.test(navigator.userAgent);
-      const d = mobile && len > 0 ? 500 : ios ? 300 : 100;
+      const d = mobile && len > 0 ? 300 : ios ? 200 : 80;
       set("restarting");
       timer = setTimeout(() => {
         if (want) { set("listening"); retries = 0; if (rec) try { rec.start(); } catch (x) { vlog("Restart after TTS failed", x); } }
@@ -1080,7 +1083,7 @@ function renderRoute(B) {
   function speak(text) {
     if (!("speechSynthesis" in window)) return;
     voice.speakingStart();
-    const u = new SpeechSynthesisUtterance(text); u.rate = 0.95;
+    const u = new SpeechSynthesisUtterance(sayable(text)); u.rate = 1.12;
     const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = "en-GB";
     const len = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? text.length : 0;
     let done = false; const fin = () => { if (!done) { done = true; voice.speakingEnd(len); } };
@@ -1088,13 +1091,13 @@ function renderRoute(B) {
     const guard = setTimeout(() => { console.warn("[Voice] utterance.onend never fired — forcing mic restart"); fin(); }, 150 + wd * 2);
     u.onend = () => { clearTimeout(guard); fin(); }; u.onerror = () => { clearTimeout(guard); fin(); };
     const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    setTimeout(() => { try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.speechSynthesis.speak(u); } catch (e) { console.warn("[Voice] speak failed", e); fin(); } }, ios ? 300 : 100);
+    setTimeout(() => { try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.speechSynthesis.speak(u); } catch (e) { console.warn("[Voice] speak failed", e); fin(); } }, ios ? 120 : 60);
   }
   function callout(stop, name) {
     const p = [];
     if (S.mode === "sorting") { if (name) p.push(name); if (stop.road) p.push(stop.road); }
     else if (S.mode === "delivery") p.push(`Stop ${stop.stopOrder}`);
-    else { if (name) p.push(name); if (stop.road) p.push(stop.road); p.push(`Stop ${stop.stopOrder}`); }
+    else { if (name) p.push(name); p.push(`Stop ${stop.stopOrder}`); }
     return p.join(". ");
   }
   const ctx = (t, level, results) => ({ transcript: t, normalizedTranscript: normTranscript(t), matchLevel: level, matchResults: results, timestamp: Date.now() });
