@@ -550,6 +550,16 @@ const root = () => $("#root");
 
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
+let _voice = null;
+function pickVoice() {
+  if (!("speechSynthesis" in window)) return null;
+  if (_voice) return _voice;
+  const vs = window.speechSynthesis.getVoices() || []; if (!vs.length) return null;
+  const by = l => vs.find(v => v.lang && v.lang.replace("_", "-").toLowerCase().startsWith(l));
+  _voice = by("en-ie") || by("en-gb") || by("en-us") || by("en") || null;
+  return _voice;
+}
+if ("speechSynthesis" in window) { try { window.speechSynthesis.getVoices(); window.speechSynthesis.onvoiceschanged = () => { _voice = null; pickVoice(); }; } catch {} }
 function createVoice(onTranscript, onError, onState, lang = "en-IE") {
   let rec = null, want = false, st = "idle", timer = null, retries = 0;
   const set = s => { st = s; onState(s); };
@@ -559,14 +569,22 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     if (!SR) { onError("Speech recognition not supported in this browser."); return; }
     if (rec) return;
     rec = new SR(); rec.lang = lang; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
-    rec.onstart = () => { vlog("Recognition started"); retries = 0; set("listening"); };
+    let lastInterim = "", gotFinal = false, silenceTimer = null;
+    const finishInterim = why => {
+      clearTimeout(silenceTimer);
+      if (!gotFinal && lastInterim.trim()) { vlog("Using last heard words as final (" + why + ")", lastInterim); gotFinal = true; const t = lastInterim; lastInterim = ""; onTranscript(t, true); }
+    };
+    rec.onstart = () => { vlog("Recognition started"); retries = 0; lastInterim = ""; gotFinal = false; set("listening"); };
     rec.onresult = e => {
       let interim = "", fin = "";
       for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; e.results[i].isFinal ? (fin += t) : (interim += t); }
-      if (interim) onTranscript(interim, false);
-      if (fin) { vlog("Final transcript", fin); onTranscript(fin, true); }
+      if (interim) { lastInterim = interim; onTranscript(interim, false);
+        // iPhone Safari often never sends a "final" result — if the words stop changing for 1.2s, use them
+        clearTimeout(silenceTimer); silenceTimer = setTimeout(() => { finishInterim("pause"); try { rec.stop(); } catch {} }, 1200); }
+      if (fin) { clearTimeout(silenceTimer); gotFinal = true; lastInterim = ""; vlog("Final transcript", fin); onTranscript(fin, true); }
     };
     rec.onend = () => {
+      finishInterim("end");
       clear();
       if (want && (st === "listening" || st === "restarting")) {
         const d = Math.min(100 * Math.pow(2, Math.min(retries, 4)), 1600);
@@ -600,7 +618,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     },
     prime() {
       if (/iPad|iPhone|iPod/.test(navigator.userAgent) && "speechSynthesis" in window) {
-        try { window.speechSynthesis.resume?.(); const u = new SpeechSynthesisUtterance(" "); u.volume = 0; u.rate = 2; window.speechSynthesis.speak(u); } catch {}
+        try { window.speechSynthesis.resume?.(); const u = new SpeechSynthesisUtterance("ok"); u.volume = 0.01; u.rate = 2; window.speechSynthesis.speak(u); } catch {}
       }
     },
     destroy() { want = false; clear(); if (rec) try { rec.abort(); } catch {} }
@@ -1062,13 +1080,15 @@ function renderRoute(B) {
   function speak(text) {
     if (!("speechSynthesis" in window)) return;
     voice.speakingStart();
-    const u = new SpeechSynthesisUtterance(text); u.lang = "en-IE"; u.rate = 0.95;
+    const u = new SpeechSynthesisUtterance(text); u.rate = 0.95;
+    const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = "en-GB";
     const len = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? text.length : 0;
     let done = false; const fin = () => { if (!done) { done = true; voice.speakingEnd(len); } };
     const wd = Math.min(4000, Math.max(600, text.length * 80));
     const guard = setTimeout(() => { console.warn("[Voice] utterance.onend never fired — forcing mic restart"); fin(); }, 150 + wd * 2);
     u.onend = () => { clearTimeout(guard); fin(); }; u.onerror = () => { clearTimeout(guard); fin(); };
-    setTimeout(() => { window.speechSynthesis.cancel(); window.speechSynthesis.speak(u); }, 100);
+    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    setTimeout(() => { try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.speechSynthesis.speak(u); } catch (e) { console.warn("[Voice] speak failed", e); fin(); } }, ios ? 300 : 100);
   }
   function callout(stop, name) {
     const p = [];
@@ -1483,8 +1503,15 @@ function renderRoute(B) {
     if (voice.state === "listening" || voice.state === "speaking") { voice.toggle(); S.query = ""; qEl.value = ""; window.speechSynthesis?.cancel(); drawList(); }
     else voice.toggle();
   };
-  const unlock = () => { try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; window.speechSynthesis.speak(u); } catch {} };
-  $("[data-audio]").onpointerdown = unlock; $("[data-audio]").onclick = unlock;
+  const unlock = () => {
+    try {
+      window.speechSynthesis.cancel(); window.speechSynthesis.resume?.();
+      const u = new SpeechSynthesisUtterance("Sound on"); const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = "en-GB";
+      u.onend = () => toast.success("🔊 Sound is working"); u.onerror = ev => toast.error("Sound blocked (" + (ev.error || "error") + ") — check the silent switch and volume");
+      window.speechSynthesis.speak(u);
+    } catch (e) { toast.error("This browser can't speak"); }
+  };
+  $("[data-audio]").onclick = unlock;
   const ftb = $("[data-ft]"); if (ftb) ftb.onclick = () => { S.fieldTest = !S.fieldTest; lsSet(FT_KEY, String(S.fieldTest)); toast.success(S.fieldTest ? "Field test logging enabled" : "Field test logging disabled"); drawHeader(); };
   const exb = $("[data-export]"); if (exb) exb.onclick = exportMappings;
   const ro = $("[data-reorder]"); if (ro) ro.onclick = () => { S.reorder = !S.reorder; S.query = ""; qEl.value = ""; S.parcelList = false; drawHeader(); drawList(); };
