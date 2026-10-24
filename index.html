@@ -574,7 +574,8 @@ function pickVoice() {
 }
 if ("speechSynthesis" in window) { try { window.speechSynthesis.getVoices(); window.speechSynthesis.onvoiceschanged = () => { _voice = null; pickVoice(); }; } catch {} }
 function createVoice(onTranscript, onError, onState, lang = "en-IE") {
-  let rec = null, want = false, st = "idle", timer = null, retries = 0;
+  let rec = null, want = false, st = "idle", timer = null, retries = 0, micOn = false, idleWaiters = [];
+  const micOff = () => { micOn = false; const w = idleWaiters; idleWaiters = []; w.forEach(f => f()); };
   const set = s => { st = s; onState(s); };
   const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
   function ensure() {
@@ -587,7 +588,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       clearTimeout(silenceTimer);
       if (!gotFinal && lastInterim.trim()) { vlog("Using last heard words as final (" + why + ")", lastInterim); gotFinal = true; const t = lastInterim; lastInterim = ""; onTranscript(t, true); }
     };
-    rec.onstart = () => { vlog("Recognition started"); retries = 0; lastInterim = ""; gotFinal = false; set("listening"); };
+    rec.onstart = () => { micOn = true; vlog("Recognition started"); retries = 0; lastInterim = ""; gotFinal = false; set("listening"); };
     rec.onresult = e => {
       let interim = "", fin = "";
       for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; e.results[i].isFinal ? (fin += t) : (interim += t); }
@@ -598,6 +599,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       else if (fin) { clearTimeout(silenceTimer); gotFinal = true; lastInterim = ""; vlog("Final transcript", fin); onTranscript(fin, true); }
     };
     rec.onend = () => {
+      micOff();
       finishInterim("end");
       clear();
       if (want && (st === "listening" || st === "restarting")) {
@@ -620,6 +622,8 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     stop() { want = false; clear(); if (rec) try { rec.abort(); } catch {} set("idle"); },
     toggle() { st === "idle" ? api.start() : api.stop(); },
     speakingStart() { clear(); set("speaking"); if (rec) try { rec.abort(); } catch {} },
+    // iPhone: the speaker stays silent while the mic still holds the audio — wait until the mic has really let go
+    whenMicOff(max = 700) { return new Promise(res => { if (!micOn) return res(); const t = setTimeout(() => { micOn = false; res(); }, max); idleWaiters.push(() => { clearTimeout(t); res(); }); }); },
     speakingEnd(len = 0) {
       clear();
       const ios = /iPad|iPhone|iPod/.test(navigator.userAgent), mobile = ios || /Android/i.test(navigator.userAgent);
@@ -1099,10 +1103,12 @@ function renderRoute(B) {
     const len = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? text.length : 0;
     let done = false; const fin = () => { if (!done) { done = true; voice.speakingEnd(len); } };
     const wd = Math.min(4000, Math.max(600, text.length * 80));
-    const guard = setTimeout(() => { console.warn("[Voice] utterance.onend never fired — forcing mic restart"); fin(); }, 150 + wd * 2);
-    u.onend = () => { clearTimeout(guard); fin(); }; u.onerror = () => { clearTimeout(guard); fin(); };
+    let guard = null;
+    u.onend = () => { clearTimeout(guard); fin(); }; u.onerror = e => { console.warn("[Voice] speech error", e && e.error); clearTimeout(guard); fin(); };
     const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    setTimeout(() => { try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.speechSynthesis.speak(u); } catch (e) { console.warn("[Voice] speak failed", e); fin(); } }, ios ? 120 : 60);
+    u.volume = 1;
+    const go = () => { guard = setTimeout(() => { console.warn("[Voice] utterance.onend never fired — forcing mic restart"); fin(); }, 400 + wd * 2); try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.speechSynthesis.speak(u); } catch (e) { console.warn("[Voice] speak failed", e); fin(); } };
+    (voice.whenMicOff ? voice.whenMicOff(700) : Promise.resolve()).then(() => setTimeout(go, ios ? 250 : 60));
   }
   function callout(stop, name) {
     const p = [];
