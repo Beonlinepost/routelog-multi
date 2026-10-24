@@ -897,14 +897,17 @@ async function tabField(body) {
           <td class="py-2 pr-3">${badge(o)}${o.learned_mapping_used ? ` <span class="text-xs text-muted-foreground">learned</span>` : ""}</td>
           <td class="py-2 pr-3">${st ? `${esc(st.business_name || splitPipe(st.residents)[0] || "")}<div class="text-xs text-muted-foreground">#${st.stop_order}</div>` : esc(o.selected_stop_name || "—")}</td>
           <td class="py-2 whitespace-nowrap">${o.fixed ? `<span class="text-xs text-emerald-700 font-semibold">Fixed ✓</span>` : `
+            ${o.original_transcript ? `<button data-pick="${o.id}" class="${isIssue(o) ? btnPrimary : btnOutline} !py-1 text-xs" title="Pick the right house — the app will remember this forever">${isIssue(o) ? "Fix" : "Wrong house?"}</button>` : ""}
             ${canAlias ? `<button data-alias="${o.id}" class="${btnOutline} !py-1 text-xs" title="Adds what the phone heard to this house's aliases, so it's found next time">+ Add as alias</button>` : ""}
-            ${isIssue(o) ? `<button data-fix="${o.id}" class="${btnOutline} !py-1 text-xs">Mark fixed</button>` : ""}`}</td></tr>`;
+            ${isIssue(o) ? `<button data-fix="${o.id}" class="${btnOutline} !py-1 text-xs" title="Not a name (chat, noise) — just hide it">Ignore</button>` : ""}`}</td></tr>`;
       }).join("")}</tbody></table>${ev.length > 300 ? `<p class="text-xs text-muted-foreground mt-2">Showing latest 300 of ${ev.length}</p>` : ""}</div>
       <div class="flex gap-2"><button data-csv class="${btnOutline}">${icon("download", 16)}Export CSV</button><button data-clear class="${btnDanger}">${icon("trash", 16)}Clear log</button></div>`;
     $("[data-csv]", inner)?.addEventListener("click", () => downloadFile(`voice-searches-${A.routeSel}-${new Date().toISOString().slice(0, 10)}.csv`, toCSV([["Time", "Mode", "Relief", "Heard", "App said", "Result", "Corrected", "Right house", "Reply ms"],
       ...all.map(o => [o.created_at, o.app_mode, o.by_relief ? "yes" : "", o.original_transcript, o.spoken, o.outcome, o.manual_correction_made ? "yes" : "", o.selected_stop_name, o.response_time_ms])]), "text/csv"));
     $("[data-clear]", inner)?.addEventListener("click", async () => { if (!confirm("Clear the voice search log for this route?")) return; const { error } = await sb.from("search_events").delete().eq("route_id", A.routeSel); if (error) return toast.error(error.message); toast.success("Cleared"); load(); });
     inner.onclick = async e => {
+      const pk = e.target.closest("[data-pick]");
+      if (pk) return pickHouse(all.find(x => x.id === +pk.dataset.pick));
       const al = e.target.closest("[data-alias]"), fx = e.target.closest("[data-fix]");
       if (!al && !fx) return;
       const o = all.find(x => x.id === +(al || fx).dataset[al ? "alias" : "fix"]);
@@ -920,6 +923,45 @@ async function tabField(body) {
       await sb.from("search_events").update({ fixed: true }).eq("id", o.id);
       o.fixed = true; draw(all);
     };
+  }
+  /* Fix: pick the right house → saved forever (learned name + alias on the house) */
+  function pickHouse(o) {
+    const heard = (o.original_transcript || "").trim(); if (!heard) return;
+    const stops = [...stopsById.values()].sort((a, b) => (a.section_id - b.section_id) || (a.stop_order - b.stop_order));
+    const label = st => esc(st.business_name || splitPipe(st.residents).join(", ") || "Stop " + st.stop_order);
+    const ov = document.createElement("div");
+    ov.className = "fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-4 overflow-y-auto";
+    ov.innerHTML = `<div class="bg-card rounded-lg shadow-xl w-full max-w-xl mt-10 p-5">
+      <div class="text-sm text-muted-foreground">The phone heard</div>
+      <div class="text-xl font-bold mb-3">“${esc(heard)}”</div>
+      <label class="text-sm font-semibold">Which house is it? Type a name, road or eircode</label>
+      <input data-q class="w-full mt-1 mb-3 px-3 py-2 border border-border rounded-md bg-background" placeholder="e.g. Devenney" autofocus>
+      <div data-list class="max-h-80 overflow-y-auto border border-border rounded-md divide-y divide-border"></div>
+      <div class="flex justify-between items-center mt-4"><span class="text-xs text-muted-foreground">Saved forever, for every phone on this route.</span><button data-x class="${btnOutline}">Cancel</button></div></div>`;
+    document.body.appendChild(ov);
+    const q = $("[data-q]", ov), list = $("[data-list]", ov);
+    const show = () => {
+      const t = q.value.trim().toLowerCase();
+      const hits = (t ? stops.filter(st => [st.residents, st.business_name, st.aliases, st.road, st.eircode, st.house_name].join(" ").toLowerCase().includes(t)) : stops).slice(0, 60);
+      list.innerHTML = hits.length ? hits.map(st => `<button data-sid="${st.id}" class="w-full text-left px-3 py-2 hover:bg-muted"><div class="font-semibold">${label(st)}</div><div class="text-xs text-muted-foreground">#${st.stop_order}${st.road ? " · " + esc(st.road) : ""}${st.eircode ? " · " + esc(st.eircode) : ""}</div></button>`).join("") : `<div class="p-3 text-sm text-muted-foreground">No house matches “${esc(q.value)}”</div>`;
+    };
+    const firstWord = heard.split(/\s+/).pop(); q.value = ""; show();
+    q.oninput = show;
+    $("[data-x]", ov).onclick = () => ov.remove();
+    ov.onclick = async e => {
+      if (e.target === ov) return ov.remove();
+      const b = e.target.closest("[data-sid]"); if (!b) return;
+      const st = stopsById.get(+b.dataset.sid);
+      b.disabled = true; b.style.opacity = .5;
+      const { error } = await sb.rpc("record_correction", { p_route_id: A.routeSel, p_stop_id: st.id, p_original: heard, p_normalized: heard.toLowerCase().replace(/\s+/g, " "), p_tags: ["admin"] });
+      if (error) { b.disabled = false; b.style.opacity = 1; return toast.error(error.message); }
+      const al = splitPipe(st.aliases);
+      if (!al.some(x => x.toLowerCase() === heard.toLowerCase())) { al.push(heard); const u = await sb.from("stops").update({ aliases: al.join(" | ") }).eq("id", st.id); if (!u.error) st.aliases = al.join(" | "); }
+      await sb.from("search_events").update({ fixed: true }).eq("id", o.id);
+      o.fixed = true; ov.remove(); draw(all);
+      toast.success(`Saved for good: “${heard}” → ${st.business_name || splitPipe(st.residents)[0]}`);
+    };
+    setTimeout(() => q.focus(), 50);
   }
   await load();
   fieldTimer = setInterval(() => { if (A.tab === "field-testing" && document.visibilityState === "visible") load(); else clearInterval(fieldTimer); }, 20000);
