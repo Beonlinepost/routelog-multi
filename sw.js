@@ -2,7 +2,7 @@
    App pages: network first, fall back to the saved copy.
    Libraries/fonts: saved copy first. Database calls are never cached here
    (the app keeps its own saved copy of each route). */
-const CACHE = "routelog-v15";
+const CACHE = "routelog-v16";
 const SHELL = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js",
   "https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"];

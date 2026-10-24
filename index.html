@@ -1184,6 +1184,7 @@ function renderRoute(B) {
       if (r.stop && oneWord && !learned && searchStops(pool(), pp.name).results.length > 1) { r.results = searchStops(pool(), pp.name).results; r.stop = null; }
       S.lastCtx = ctx(pp.name, r.level, r.results);
       if (r.stop && !r.weak) {
+        if (r.ri) { const nm = nameFor(r.stop, pp.name); S.query = nm || pp.name; qEl.value = S.query; S.riPick = r.stop; drawList(); }
         await logParcel(r.stop, pp.count, "voice");
         say(`${countWord(pp.count)}. ${spokenName(r.stop, matchStop(r.stop, pp.name)) || "Stop " + r.stop.stopOrder}. ${zoneOf(r.stop) ? shelfWords(r.stop) : (r.stop.road || "")}`.trim(), t, "parcel", r.stop, r.results, !!learned);
       } else {
@@ -1196,7 +1197,7 @@ function renderRoute(B) {
     const r = await resolve(t);
     S.lastCtx = ctx(t, r.level, r.results);
     const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
-    if (r.ri) { logLetter(r.stop); return say(callout(r.stop, nameFor(r.stop, t)), t, "found", r.stop, r.results, r.learned); }
+    if (r.ri) { const nm = nameFor(r.stop, t); S.query = nm || t; qEl.value = S.query; S.riPick = r.stop; drawList(); logLetter(r.stop); return say(callout(r.stop, nm), t, "found", r.stop, r.results, r.learned); }
     if (!r.results.length) { say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: sectionStops(), onSave: saveName }); return; }
     if (r.level === 1 || r.level === 2) {
       if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
