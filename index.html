@@ -1019,6 +1019,7 @@ async function viewShare(token) {
   mount(`<div class="min-h-screen flex items-center justify-center bg-background"><p class="text-muted-foreground text-sm">Loading route…</p></div>`);
   let b;
   try { b = await loadShareBundle(token); } catch (e) { b = null; }
+  if (!b && navigator.onLine && lsGet("rl-relief") === token) { try { localStorage.removeItem("rl-relief"); } catch {} }
   if (!b) { mount(`<div class="min-h-screen flex items-center justify-center bg-background px-4"><div class="text-center"><p class="text-lg font-semibold text-foreground">Route not found</p><p class="text-sm text-muted-foreground mt-1">This share link may be invalid or expired.</p></div></div>`); return; }
   renderRoute({ ...b, routeId: b.route.id, token });
 }
@@ -1649,11 +1650,14 @@ async function router() {
   const h = location.hash.replace(/^#/, "") || "/";
   const parts = h.split("/").filter(Boolean);
   const qsRelief = new URLSearchParams(location.search).get("relief");   // ?relief=TOKEN survives apps that drop the #part
-  if (qsRelief) return viewShare(qsRelief);
-  if (parts[0] === "share" && parts[1]) return viewShare(parts[1]);
+  if (qsRelief) { lsSet("rl-relief", qsRelief); return viewShare(qsRelief); }
+  if (parts[0] === "share" && parts[1]) { lsSet("rl-relief", parts[1]); return viewShare(parts[1]); }
   if (parts[0] === "newpass") return viewLogin("newpass");
   await loadProfile();
   if (!state.user) {
+    // This phone opened a test/relief link before — keep it open, no sign-in, until that link is reset in Admin
+    const saved = lsGet("rl-relief");
+    if (saved && !["signup", "reset", "login"].includes(parts[0])) return viewShare(saved);
     if (parts[0] === "signup") return viewLogin("signup");
     if (parts[0] === "reset") return viewLogin("reset");
     return viewLogin("signin");
