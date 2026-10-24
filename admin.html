@@ -896,7 +896,7 @@ async function tabField(body) {
           <td class="py-2 pr-3 text-muted-foreground">${esc(o.spoken || "")}</td>
           <td class="py-2 pr-3">${badge(o)}${o.learned_mapping_used ? ` <span class="text-xs text-muted-foreground">learned</span>` : ""}</td>
           <td class="py-2 pr-3">${st ? `${esc(st.business_name || splitPipe(st.residents)[0] || "")}<div class="text-xs text-muted-foreground">#${st.stop_order}</div>` : esc(o.selected_stop_name || "—")}</td>
-          <td class="py-2 whitespace-nowrap">${o.fixed ? `<span class="text-xs text-emerald-700 font-semibold">Fixed ✓</span>` : `
+          <td class="py-2 whitespace-nowrap">${o.fixed ? `<span class="text-xs text-emerald-700 font-semibold mr-2">Fixed ✓</span><button data-undo="${o.id}" class="${btnOutline} !py-1 text-xs" title="Take it back — the app forgets what it learned from this">Undo</button>` : `
             ${o.original_transcript ? `<button data-pick="${o.id}" class="${isIssue(o) ? btnPrimary : btnOutline} !py-1 text-xs" title="Pick the right house — the app will remember this forever">${isIssue(o) ? "Fix" : "Wrong house?"}</button>` : ""}
             ${canAlias ? `<button data-alias="${o.id}" class="${btnOutline} !py-1 text-xs" title="Adds what the phone heard to this house's aliases, so it's found next time">+ Add as alias</button>` : ""}
             ${isIssue(o) ? `<button data-fix="${o.id}" class="${btnOutline} !py-1 text-xs" title="Not a name (chat, noise) — just hide it">Ignore</button>` : ""}`}</td></tr>`;
@@ -906,6 +906,22 @@ async function tabField(body) {
       ...all.map(o => [o.created_at, o.app_mode, o.by_relief ? "yes" : "", o.original_transcript, o.spoken, o.outcome, o.manual_correction_made ? "yes" : "", o.selected_stop_name, o.response_time_ms])]), "text/csv"));
     $("[data-clear]", inner)?.addEventListener("click", async () => { if (!confirm("Clear the voice search log for this route?")) return; const { error } = await sb.from("search_events").delete().eq("route_id", A.routeSel); if (error) return toast.error(error.message); toast.success("Cleared"); load(); });
     inner.onclick = async e => {
+      const un = e.target.closest("[data-undo]");
+      if (un) {
+        const o = all.find(x => x.id === +un.dataset.undo), heard = (o.original_transcript || "").trim(), n = heard.toLowerCase().replace(/\s+/g, " ");
+        if (!confirm(`Undo “${heard}”? The app will forget anything it learned from it.`)) return;
+        if (heard) {
+          const { data: cs = [] } = await sb.from("corrections").select("id,stop_id").eq("route_id", A.routeSel).eq("normalized_transcript", n);
+          for (const c of cs || []) {
+            const d = await sb.from("corrections").delete().eq("id", c.id);
+            if (d.error) await sb.from("corrections").update({ stop_id: null }).eq("id", c.id);
+            const st = stopsById.get(c.stop_id);
+            if (st) { const al = splitPipe(st.aliases).filter(x => x.toLowerCase() !== heard.toLowerCase()); if (al.length !== splitPipe(st.aliases).length) { await sb.from("stops").update({ aliases: al.join(" | ") || null }).eq("id", st.id); st.aliases = al.join(" | "); } }
+          }
+        }
+        await sb.from("search_events").update({ fixed: false }).eq("id", o.id);
+        o.fixed = false; draw(all); return toast.success(`Undone — “${heard}” forgotten`);
+      }
       const pk = e.target.closest("[data-pick]");
       if (pk) return pickHouse(all.find(x => x.id === +pk.dataset.pick));
       const al = e.target.closest("[data-alias]"), fx = e.target.closest("[data-fix]");
