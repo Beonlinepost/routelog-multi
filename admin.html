@@ -875,8 +875,12 @@ async function tabField(body) {
     : o.outcome === "list" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600">Showed list</span>`
     : o.outcome === "no-match" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">No match</span>`
     : `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-700">Corrected</span>`;
-  const isIssue = o => !o.fixed && (o.manual_correction_made || o.outcome === "no-match" || o.outcome === "list");
+  // A tap on the phone already saves the name for good — so a "Corrected" row, or a miss that was later found from what it learned, is already sorted
+  let learnedOk = new Set();
+  const isLearned = o => o.manual_correction_made || learnedOk.has((o.original_transcript || "").trim().toLowerCase());
+  const isIssue = o => !o.fixed && !isLearned(o) && (o.outcome === "no-match" || o.outcome === "list");
   function draw(all) {
+    learnedOk = new Set(all.filter(x => x.manual_correction_made || (x.outcome === "found" && x.learned_mapping_used)).map(x => (x.original_transcript || "").trim().toLowerCase()));
     const g = fieldStats(all), ev = onlyIssues ? all.filter(isIssue) : all, v = g.voiceSearches - 0;
     const tile = (l, val, sub) => `<div class="p-4 bg-card rounded-lg border border-border"><div class="text-sm text-muted-foreground">${l}</div><div class="text-3xl font-bold text-foreground mt-2">${val}</div>${sub ? `<div class="text-xs text-muted-foreground mt-1">${sub}</div>` : ""}</div>`;
     inner.innerHTML = !all.length ? `<div class="${card} text-center text-muted-foreground">No voice searches logged yet. Use the mic in the app — every search appears here within 20 seconds.</div>` : `
@@ -896,7 +900,7 @@ async function tabField(body) {
           <td class="py-2 pr-3 text-muted-foreground">${esc(o.spoken || "")}</td>
           <td class="py-2 pr-3">${badge(o)}${o.learned_mapping_used ? ` <span class="text-xs text-muted-foreground">learned</span>` : ""}</td>
           <td class="py-2 pr-3">${st ? `${esc(st.business_name || splitPipe(st.residents)[0] || "")}<div class="text-xs text-muted-foreground">#${st.stop_order}</div>` : esc(o.selected_stop_name || "—")}</td>
-          <td class="py-2 whitespace-nowrap">${o.fixed ? `<span class="text-xs text-emerald-700 font-semibold mr-2">Fixed ✓</span><button data-undo="${o.id}" class="${btnOutline} !py-1 text-xs" title="Take it back — the app forgets what it learned from this">Undo</button>` : `
+          <td class="py-2 whitespace-nowrap">${!o.fixed && isLearned(o) && o.outcome !== "found" ? `<span class="text-xs text-emerald-700 font-semibold mr-2" title="The postman's tap saved this for good">Learned ✓</span><button data-pick="${o.id}" class="${btnOutline} !py-1 text-xs">Wrong house?</button>` : o.fixed ? `<span class="text-xs text-emerald-700 font-semibold mr-2">Fixed ✓</span><button data-undo="${o.id}" class="${btnOutline} !py-1 text-xs" title="Take it back — the app forgets what it learned from this">Undo</button>` : `
             ${o.original_transcript ? `<button data-pick="${o.id}" class="${isIssue(o) ? btnPrimary : btnOutline} !py-1 text-xs" title="Pick the right house — the app will remember this forever">${isIssue(o) ? "Fix" : "Wrong house?"}</button>` : ""}
             ${canAlias ? `<button data-alias="${o.id}" class="${btnOutline} !py-1 text-xs" title="Adds what the phone heard to this house's aliases, so it's found next time">+ Add as alias</button>` : ""}
             ${isIssue(o) ? `<button data-fix="${o.id}" class="${btnOutline} !py-1 text-xs" title="Not a name (chat, noise) — just hide it">Ignore</button>` : ""}`}</td></tr>`;
