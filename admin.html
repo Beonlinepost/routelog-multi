@@ -822,7 +822,17 @@ async function tabMappings(body) {
 }
 
 /* ---------- Field Testing (live log — fix as we go) ---------- */
+/* Talk that isn't a name ("why is it not picking up", "okay so") — ignore quietly instead of "no match" */
+function looksLikeChatter(t) {
+  const w = String(t || "").toLowerCase().replace(/[^a-z'\s]/g, " ").split(/\s+/).filter(Boolean);
+  if (!w.length) return true;
+  if (w.length > 4) return true;
+  const talk = new Set(["what", "why", "how", "is", "it's", "its", "i", "i'm", "im", "i'll", "okay", "ok", "yeah", "yes", "no", "so", "but", "like", "this", "that", "there", "does", "do", "did", "fix", "stop", "cancel", "huh", "it", "we", "you", "he", "she", "they", "look", "say", "read", "talking", "hello", "hi", "thanks", "please", "wait", "hang", "hold", "where", "when", "who", "can", "could", "would", "should", "have", "has", "had", "was", "were", "are", "be", "been", "not", "don't", "dont", "the", "a", "of", "with", "for", "at", "my", "me", "your", "our", "skip", "go", "going", "gonna", "got", "get", "let's", "lets", "test", "testing", "one", "two", "three", "again", "now", "then", "here", "save", "press", "tap", "click"]);
+  return talk.has(w[0]) || w.every(x => talk.has(x));
+}
+const isChatter = o => o.outcome === "chatter" || (o.outcome === "no-match" && !o.manual_correction_made && looksLikeChatter(o.original_transcript));
 function fieldStats(ev) {
+  ev = ev.filter(o => !isChatter(o));
   const voice = ev.filter(e => e.outcome !== "box");
   const r = { totalSearches: ev.length, voiceSearches: voice.length, firstTime: 0, corrected: 0, noMatch: 0, list: 0, parcels: 0,
     successfulFirstTimeMatches: 0, searchesRequiringManualCorrection: 0, newLearnedMappingsCreated: 0, averageResponseTimeMs: 0,
@@ -874,12 +884,13 @@ async function tabField(body) {
     : o.outcome === "parcel" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-yellow-100 text-yellow-800">Parcel ✓</span>`
     : o.outcome === "box" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-sky-100 text-sky-700">Box</span>`
     : o.outcome === "list" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600">Showed list</span>`
+    : isChatter(o) ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500">Not a name</span>`
     : o.outcome === "no-match" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">No match</span>`
     : `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-700">Corrected</span>`;
   // A tap on the phone already saves the name for good — so a "Corrected" row, or a miss that was later found from what it learned, is already sorted
   let learnedOk = new Set(), lockedSet = new Set();
   const isLearned = o => o.manual_correction_made || learnedOk.has((o.original_transcript || "").trim().toLowerCase()) || lockedSet.has((o.original_transcript || "").trim().toLowerCase().replace(/\s+/g, " "));
-  const isIssue = o => !o.fixed && !isLearned(o) && (o.outcome === "no-match" || o.outcome === "list");
+  const isIssue = o => !o.fixed && !isChatter(o) && !isLearned(o) && (o.outcome === "no-match" || o.outcome === "list");
   function draw(all) {
     learnedOk = new Set(all.filter(x => x.manual_correction_made || (x.outcome === "found" && x.learned_mapping_used)).map(x => (x.original_transcript || "").trim().toLowerCase()));
     const g = fieldStats(all), ev = onlyIssues ? all.filter(isIssue) : all, v = g.voiceSearches - 0;

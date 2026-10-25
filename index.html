@@ -435,6 +435,35 @@ function irishVersion(t) {
   });
   return changed ? out.join(" ") : null;
 }
+/* Drop leading filler the phone picks up: "and Campbell", "on Deveney", "to McCall" */
+function cleanHeard(t) {
+  const fill = new Set(["and", "an", "on", "own", "to", "in", "oh", "so", "the", "all", "a", "ok", "okay", "yeah", "um", "uh", "er", "erm", "now", "right"]);
+  const w = String(t || "").trim().split(/\s+/).filter(Boolean);
+  while (w.length > 1 && fill.has(w[0].toLowerCase().replace(/[^a-z]/g, ""))) w.shift();
+  return w.join(" ");
+}
+/* Talk that isn't a name ("why is it not picking up", "okay so") — ignore quietly instead of "no match" */
+function looksLikeChatter(t) {
+  const w = String(t || "").toLowerCase().replace(/[^a-z'\s]/g, " ").split(/\s+/).filter(Boolean);
+  if (!w.length) return true;
+  if (w.length > 4) return true;
+  const talk = new Set(["what", "why", "how", "is", "it's", "its", "i", "i'm", "im", "i'll", "okay", "ok", "yeah", "yes", "no", "so", "but", "like", "this", "that", "there", "does", "do", "did", "fix", "stop", "cancel", "huh", "it", "we", "you", "he", "she", "they", "look", "say", "read", "talking", "hello", "hi", "thanks", "please", "wait", "hang", "hold", "where", "when", "who", "can", "could", "would", "should", "have", "has", "had", "was", "were", "are", "be", "been", "not", "don't", "dont", "the", "a", "of", "with", "for", "at", "my", "me", "your", "our", "skip", "go", "going", "gonna", "got", "get", "let's", "lets", "test", "testing", "one", "two", "three", "again", "now", "then", "here", "save", "press", "tap", "click"]);
+  return talk.has(w[0]) || w.every(x => talk.has(x));
+}
+/* Which person in the house was asked for: "Winifred McConnell" → "Winifred Greene McConnell", not "Owenie Greene" */
+function bestResident(stop, t) {
+  const rw = nameWords(t); if (!rw.length) return null;
+  let best = null, bestSc = 0;
+  splitPipe(stop.residents).forEach(n => {
+    const lw = nameWords(n); if (!lw.length) return;
+    let sc;
+    if (rw.length >= 2 && lw.length >= 2) { const last = rw[rw.length - 1]; sc = (confidence(rw[0], lw[0]) + Math.max(...lw.slice(1).map(x => x === last ? 1 : confidence(last, x)))) / 2; }
+    else sc = Math.max(...lw.map(x => confidence(rw[0], x)));
+    if (sc > bestSc) { bestSc = sc; best = n; }
+  });
+  if (stop.businessName && confidence(nameWords(stop.businessName).join(""), rw.join("")) > bestSc) return stop.businessName;
+  return bestSc >= 0.6 ? best : null;
+}
 class RouteIntelligence {
   constructor(routeId) {
     this.routeId = routeId; this.stops = new Map(); this.learning = new LocalLearning(routeId); this.cache = new Map();
@@ -603,7 +632,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v20";
+const APP_VERSION = "v21";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
@@ -1168,7 +1197,13 @@ function renderRoute(B) {
   const ctx = (t, level, results) => ({ transcript: t, normalizedTranscript: normTranscript(t), matchLevel: level, matchResults: results, timestamp: Date.now() });
 
   /* resolve a spoken name to exactly one stop (or null + results) */
-  const nameFor = (stop, t) => { const cp = coupleNames(t); return cp ? spokenName(stop, matchStop(stop, cp[0]).matched ? matchStop(stop, cp[0]) : matchStop(stop, cp[1])) : spokenName(stop, matchStop(stop, t)); };
+  const nameFor = (stop, t) => {
+    const cp = coupleNames(t);
+    if (cp) return spokenName(stop, matchStop(stop, cp[0]).matched ? matchStop(stop, cp[0]) : matchStop(stop, cp[1]));
+    const m = matchStop(stop, t);
+    if (m.matched) return spokenName(stop, m);
+    return bestResident(stop, t) || spokenName(stop, m);   // say the person you asked for, not the first name on the house
+  };
   async function resolve(t) {
     const r1 = await resolveOnce(t);
     if (r1.stop && !r1.weak) return r1;
@@ -1178,14 +1213,20 @@ function renderRoute(B) {
   }
   async function resolveOnce(t) {
     const P = pool(); if (!P.length) return { stop: null, results: [], level: 0 };
+    let riGuess = null;
     const special = (eircodeMatches(P, t) || coupleNames(t)) ? searchStops(P, t) : null;
     if (special && special.results.length) return { stop: special.results.length === 1 ? special.results[0] : null, results: special.results, level: 1, multi: special.results.length > 1 };
     if (RI_CFG.enabled !== false) {
-      try { const rr = await ri.search(t), hit = pickConfident(rr, P); if (hit) return { stop: hit, results: [hit], level: 3, ri: true, learned: /learned/.test(rr.find(x => x.stopId === hit.id)?.matchType || "") }; }
+      try { const rr = await ri.search(t), hit = pickConfident(rr, P); if (hit) return { stop: hit, results: [hit], level: 3, ri: true, learned: /learned/.test(rr.find(x => x.stopId === hit.id)?.matchType || "") }; riGuess = rr; }
       catch (x) { console.warn("[RI] search failed, falling back:", x); }
     }
     const { level, results } = searchStops(P, t);
-    if (!results.length) return { stop: null, results, level };
+    if (!results.length) {
+      // Nothing spelled like it — show the closest-sounding houses so one tap fixes it for good
+      const seen = new Set(), guess = (riGuess || []).filter(x => x.confidence >= 0.7 && x.stopId > 0).map(x => P.find(o => o.id === x.stopId)).filter(o => o && !seen.has(o.id) && seen.add(o.id)).slice(0, 6);
+      if (guess.length) return { stop: null, results: guess, level: 4, guess: true };
+      return { stop: null, results, level };
+    }
     if (level === 1 || level === 2) {
       const n = exactCount(results, t);
       if (n === 1) return { stop: exactFirst(results, t)[0], results, level };
@@ -1214,7 +1255,8 @@ function renderRoute(B) {
   async function onTranscript(text, isFinal) {
     S.query = text; qEl.value = text; S.riPick = null; S.parcelList = false; drawList();
     if (!isFinal) return;
-    const t = text.trim(); if (!t) return;
+    const t = cleanHeard(text); if (!t) return;
+    if (t !== text.trim()) { S.query = t; qEl.value = t; }
     S.searchStart = Date.now(); S.lastLetter = null;
     /* ---- van commands ---- */
     if (S.mode === "van") {
@@ -1253,7 +1295,15 @@ function renderRoute(B) {
     S.lastCtx = ctx(t, r.level, r.results);
     const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
     if (r.ri) { const nm = nameFor(r.stop, t); S.query = nm || t; qEl.value = S.query; S.riPick = r.stop; drawList(); logLetter(r.stop); return say(callout(r.stop, nm), t, "found", r.stop, r.results, r.learned); }
-    if (!r.results.length) { say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: all, onSave: saveName }); return; }
+    if (!r.results.length) {
+      if (looksLikeChatter(t)) { S.query = ""; qEl.value = ""; drawList(); logSearch(t, "chatter", "", null, []); return; }   // not a name — stay quiet
+      say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: all, onSave: saveName }); return;
+    }
+    if (r.guess) {
+      S.voiceList = r.results; S.voiceListQ = t; S.lastCtx = { ...S.lastCtx, timestamp: Date.now() + 10000 };   // 20s to tap
+      drawList();
+      const w = t.split(/\s+/); return say(r.results.length === 1 ? `Is it ${callout(r.results[0], nameFor(r.results[0], t))}? Tap to confirm` : `Which ${w[w.length - 1]}? Tap the house`, t, "list", null, r.results);
+    }
     if (r.level === 1 || r.level === 2) {
       if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
       logLetter(r.stop);
@@ -1439,6 +1489,7 @@ function renderRoute(B) {
     }
     const base = sectionStops(), q = S.query.trim();
     if (S.reorder || !q) return base;
+    if (S.voiceList && S.voiceListQ === S.query) return S.voiceList;
     const P = pool(), r = exactFirst(searchStops(P, q).results, S.query);
     return S.riPick && !r.some(x => x.id === S.riPick.id) ? [S.riPick, ...r] : r;
   }
