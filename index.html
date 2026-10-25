@@ -421,20 +421,33 @@ const IRISH_SOUNDS = {
   ronan: ["rownan"], donal: ["donald", "doughnal"], aodh: ["ay", "hugh"], aodhan: ["aidan", "aiden", "aedan"], caoilfhionn: ["keelin", "kaylin", "keelan"],
   eithne: ["enya", "ethna", "etna"], orlaith: ["orla", "orlah"], aine: ["anya", "onya", "awnya", "anja"], meabh: ["maeve", "mave"], blathnaid: ["blawnid", "blanid"],
   diarmuid: ["dermot", "dermid", "dearmid"], peadar: ["padder", "pader", "peter"], tomas: ["thomas", "tomás"], sean: ["shawn", "shaun", "shon"], seosamh: ["joseph"],
+  padraig: ["podrick", "podraig", "pawdrig", "pauric", "porig", "padrig", "paudrick", "podric", "poderick", "pordrick", "padrick", "padric", "patrick"],
+  daithi: ["dahi", "dahee", "dawhee", "daahi", "dahey", "dohi", "doughy", "dahy", "darhi", "dahie", "daihi", "dahei", "dahee", "dye he", "dahhi", "david"],
+  eabha: ["ava", "eva", "ayva", "aiva", "avah", "eava"], meabh: ["maeve", "mave", "maev"],
+  coyle: ["coil", "coal", "kyle", "koil", "coyl", "coyles", "quoile", "boil"], coll: ["call", "cole", "col", "coal", "kohl"],
+  mccafferty: ["mccarthy", "mccarty", "mcafferty", "mccaverty", "mccafferey", "mcaverty", "mccafferdy", "mcavity", "cavity", "mccaferty"],
+  campbell: ["camel", "cambell", "campbel", "kimble", "campell", "cammel", "gamble"], gallagher: ["gallery", "gallager", "galagher", "gallaher", "gallacher", "galligar"],
+  odonnell: ["odonald", "donald", "odonel", "odonnel"], rodgers: ["rogers", "rodger", "roger"], sharkey: ["sharky", "sharkie", "sharp key"],
+  doherty: ["dougherty", "docherty", "dockerty", "dorothy"], ferry: ["fairy", "ferri", "furry"], greene: ["green", "grain", "grin"], duffy: ["duffey", "duffie"],
+  mcfadden: ["mcfaddon", "mcfadyen", "mcfaddin"], mcgarvey: ["mcgarvie", "mcgarvy", "garvey"], roarty: ["roherty", "roti", "rory", "roarity", "rorty"], feeny: ["finney", "feeney", "feeny", "fini"],
   enhill: ["enhall", "enhil", "innhill", "inhill", "enhal", "kinnon", "anhill"], devenney: ["deveney", "devaney", "devini", "deveni", "devani", "devinney"]
 };
-const IRISH_FROM = (() => { const m = new Map(); Object.entries(IRISH_SOUNDS).forEach(([real, list]) => list.forEach(x => { if (!m.has(x)) m.set(x, real); })); return m; })();
+const IRISH_FROM = (() => { const m = new Map(); Object.entries(IRISH_SOUNDS).forEach(([real, list]) => list.forEach(x => { if (!m.has(x)) m.set(x, []); if (!m.get(x).includes(real)) m.get(x).push(real); })); return m; })();
 /* Rewrite what the phone heard into Irish spellings: "Kiva McEnhall" → "caoimhe macenhill" (null if nothing changed) */
-function irishVersion(t) {
+function irishVersions(t) {
   let changed = false;
-  const out = String(t || "").toLowerCase().replace(/[^a-z'\s]/g, " ").split(/\s+/).filter(Boolean).map(w => {
+  const opts = String(t || "").toLowerCase().replace(/[^a-z'\s]/g, " ").split(/\s+/).filter(Boolean).map(w => {
     const mc = /^ma?c/.test(w) && w.length > 4 ? w.replace(/^ma?c/, "") : null;
-    if (IRISH_FROM.has(w)) { changed = true; return IRISH_FROM.get(w); }
-    if (mc && IRISH_FROM.has(mc)) { changed = true; return "mc" + IRISH_FROM.get(mc); }
-    return w;
+    if (IRISH_FROM.has(w)) { changed = true; return [...IRISH_FROM.get(w), w]; }
+    if (mc && IRISH_FROM.has(mc)) { changed = true; return [...IRISH_FROM.get(mc).map(x => "mc" + x), w]; }
+    return [w];
   });
-  return changed ? out.join(" ") : null;
+  if (!changed) return [];
+  let out = [""];
+  opts.forEach(o => { out = out.flatMap(p => o.map(x => (p ? p + " " : "") + x)); });
+  return out.filter(x => x !== String(t).toLowerCase().trim()).slice(0, 6);
 }
+function irishVersion(t) { return irishVersions(t)[0] || null; }
 /* Drop leading filler the phone picks up: "and Campbell", "on Deveney", "to McCall" */
 function cleanHeard(t) {
   const fill = new Set(["and", "an", "on", "own", "to", "in", "oh", "so", "the", "all", "a", "ok", "okay", "yeah", "um", "uh", "er", "erm", "now", "right"]);
@@ -632,7 +645,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v21";
+const APP_VERSION = "v22";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
@@ -1207,8 +1220,15 @@ function renderRoute(B) {
   async function resolve(t) {
     const r1 = await resolveOnce(t);
     if (r1.stop && !r1.weak) return r1;
-    const t2 = irishVersion(t);
-    if (t2) { const r2 = await resolveOnce(t2); if (r2.stop && !r2.weak) return r2; if (!r1.results.length && r2.results.length) return r2; }
+    let alt = null, altGuess = null;
+    for (const t2 of irishVersions(t)) {
+      const r2 = await resolveOnce(t2);
+      if (r2.stop && !r2.weak) return r2;
+      if (!alt && r2.results.length && !r2.guess) alt = r2;
+      if (!altGuess && r2.guess) altGuess = r2;
+    }
+    if (alt && (!r1.results.length || r1.guess)) return alt;
+    if (altGuess && !r1.results.length) return altGuess;
     return r1;
   }
   async function resolveOnce(t) {
