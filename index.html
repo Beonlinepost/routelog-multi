@@ -396,6 +396,44 @@ class LocalLearning {
   }
 }
 
+/* Name words, with Mc/Mac/O joined to the surname: "Mc Enhill" → "macenhill", "O Driscoll" → "odriscoll" */
+function nameWords(x) {
+  const w = String(x || "").toLowerCase().replace(/[’']/g, "").replace(/[^a-z\s]/g, " ").split(/\s+/).filter(Boolean), out = [];
+  for (let i = 0; i < w.length; i++) {
+    if ((w[i] === "mc" || w[i] === "mac" || w[i] === "o") && w[i + 1]) { out.push((w[i] === "o" ? "o" : "mac") + w[i + 1].replace(/^ma?c/, "")); i++; }
+    else out.push(w[i].replace(/^mc/, "mac"));
+  }
+  return out;
+}
+/* How the phone usually writes Irish names it hears → the real spelling */
+const IRISH_SOUNDS = {
+  caoimhe: ["kiva", "keeva", "kweeva", "queva", "keva", "kiwi", "kieva", "quiva", "kevia", "keyva"],
+  aoife: ["eefa", "efa", "eva", "ifa", "eva", "eefah"], niamh: ["neve", "neeve", "neev", "nieve", "niev", "eve"],
+  siobhan: ["shivaun", "shivon", "chevonne", "shavon", "shevon", "chivon", "shivonne"], sinead: ["shinade", "shanade", "shinaid", "sinaid", "shenade"],
+  saoirse: ["seersha", "sersha", "searsha", "seersa", "sirsha"], roisin: ["rosheen", "rosaleen", "rasheen"], eibhlin: ["evlin", "eveleen", "aveline"],
+  sile: ["sheila", "sheelah", "shayla"], eoghan: ["owen", "eoin", "oan"], eoin: ["owen", "oan"], padraig: ["pauric", "porig", "padrig", "patrick"],
+  seamus: ["shamus", "shaymus", "seamous"], ciara: ["kiera", "keira", "kira", "chiara"], ciaran: ["kieran", "kiran", "keiran"], dearbhla: ["dervla", "derbla", "dervala"],
+  maire: ["moira", "maura", "moya"], brid: ["bridge", "breed", "breej", "bride"], caitlin: ["kathleen", "kotchlin", "catlin"], sorcha: ["sorka", "sorrca"],
+  grainne: ["grania", "granya", "grawnya", "grainya"], cathal: ["cahal", "kahal", "cohal"], donnacha: ["donagh", "dunaka", "donaka"], oisin: ["osheen", "usheen", "ushin"],
+  tadhg: ["tige", "tiger", "taig", "teig"], fionnuala: ["finola", "fenola", "finnoula", "nuala"], mairead: ["maraid", "mared", "muraid", "mareid"], noirin: ["noreen", "norine"],
+  eamon: ["amon", "aymon", "eamonn"], aisling: ["ashling", "ashlin", "ashley"], clodagh: ["cloda", "clodah"], muireann: ["mirren", "murrin", "miriam"],
+  ronan: ["rownan"], donal: ["donald", "doughnal"], aodh: ["ay", "hugh"], aodhan: ["aidan", "aiden", "aedan"], caoilfhionn: ["keelin", "kaylin", "keelan"],
+  eithne: ["enya", "ethna", "etna"], orlaith: ["orla", "orlah"], aine: ["anya", "onya", "awnya", "anja"], meabh: ["maeve", "mave"], blathnaid: ["blawnid", "blanid"],
+  diarmuid: ["dermot", "dermid", "dearmid"], peadar: ["padder", "pader", "peter"], tomas: ["thomas", "tomás"], sean: ["shawn", "shaun", "shon"], seosamh: ["joseph"],
+  enhill: ["enhall", "enhil", "innhill", "inhill", "enhal", "kinnon", "anhill"], devenney: ["deveney", "devaney", "devini", "deveni", "devani", "devinney"]
+};
+const IRISH_FROM = (() => { const m = new Map(); Object.entries(IRISH_SOUNDS).forEach(([real, list]) => list.forEach(x => { if (!m.has(x)) m.set(x, real); })); return m; })();
+/* Rewrite what the phone heard into Irish spellings: "Kiva McEnhall" → "caoimhe macenhill" (null if nothing changed) */
+function irishVersion(t) {
+  let changed = false;
+  const out = String(t || "").toLowerCase().replace(/[^a-z'\s]/g, " ").split(/\s+/).filter(Boolean).map(w => {
+    const mc = /^ma?c/.test(w) && w.length > 4 ? w.replace(/^ma?c/, "") : null;
+    if (IRISH_FROM.has(w)) { changed = true; return IRISH_FROM.get(w); }
+    if (mc && IRISH_FROM.has(mc)) { changed = true; return "mc" + IRISH_FROM.get(mc); }
+    return w;
+  });
+  return changed ? out.join(" ") : null;
+}
 class RouteIntelligence {
   constructor(routeId) {
     this.routeId = routeId; this.stops = new Map(); this.learning = new LocalLearning(routeId); this.cache = new Map();
@@ -408,6 +446,8 @@ class RouteIntelligence {
   indexStop(r) {
     splitPipe(r.residents).forEach(c => {
       this.add(c, r.id, this.index.fullNames);
+      const nw = nameWords(c);
+      if (nw.length >= 3) nw.slice(1).forEach(sn => { this.add(nw[0] + " " + sn, r.id, this.index.fullNames); this.add(sn, r.id, this.index.surnames); });
       const u = c.split(/\s+/);
       if (u.length >= 2) { this.add(u[u.length - 1], r.id, this.index.surnames); this.add(u[0], r.id, this.index.firstNames); }
     });
@@ -493,7 +533,7 @@ class RouteIntelligence {
     ];
     const [g] = metaphone(raw); let fuzzyCount = 0;
     // Compare first name with first name and surname with surname, so "Eileen Devaney" can't land on "Alan Duffy"
-    const words = x => String(x || "").toLowerCase().replace(/[^a-z'\s]/g, " ").split(/\s+/).filter(Boolean).map(w => w.replace(/^mc/, "mac").replace(/'/g, ""));
+    const words = nameWords;
     const rw = words(raw);
     const wordScore = (E, M) => {
       const lw = words(E.label);
@@ -502,7 +542,7 @@ class RouteIntelligence {
     };
     idx.forEach(([map, prio]) => {
       map.forEach((E, M) => {
-        if (M === o) { E.stopIds.forEach(T => { if (!out.has(T)) out.set(T, { stopId: T, confidence: 0.98, matchType: "exact", term: M }); }); return; }
+        if (M === o) { E.stopIds.forEach(T => { const prev = out.get(T); if (!prev || !/exact|learned/.test(prev.matchType)) out.set(T, { stopId: T, confidence: 0.98, matchType: "exact", term: M }); }); return; }
         const w = metaSim(raw, M);
         if (w >= 0.85 || (g && E.phonetic && g === E.phonetic)) {
           const c = Math.min(0.95, prio * (0.25 * w + 0.75 * wordScore(E, M)));
@@ -562,6 +602,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
+const APP_VERSION = "v19";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
@@ -792,31 +833,36 @@ function openEditModal({ stop, section, isNew, onSaved, onClose }) {
 
 /* ---------- "Is this correct?" modal (port of SaveNameModal) ---------- */
 function openSaveNameModal({ transcript, stops, onSave }) {
-  const opts = searchStops(stops, transcript).results.slice(0, 5);
+  // The phone misheard. Find the right house and tap it — what the phone heard is then linked to that house for good.
   const el = document.createElement("div");
   el.innerHTML = `<div class="fixed inset-0 z-50 bg-black/50" data-close></div>
-  <div class="fixed left-[50%] top-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg sm:max-w-md">
-    <div class="flex flex-col gap-2 text-center sm:text-left"><h2 class="text-lg leading-none font-semibold">Is this correct?</h2>
-      <p class="text-muted-foreground text-sm">You said: <span class="font-semibold text-foreground">"${esc(transcript)}"</span></p></div>
-    <div class="space-y-3">
-      ${opts.map(w => `<button data-pick="${w.id}" class="w-full p-4 text-left border-2 border-border rounded-lg hover:bg-accent hover:border-accent transition-all"><div class="font-semibold text-base">${esc(w.residents || `Stop ${w.stopOrder}`)}</div><div class="text-sm text-muted-foreground">Box ${w.stopOrder}</div></button>`).join("")}
-      <div class="${opts.length ? "pt-2 border-t" : ""}"><p class="text-sm text-muted-foreground mb-2">${opts.length ? "Not in the list? Type the correct name:" : "No matching stops found. Type the correct name:"}</p>
-        <input data-name value="${esc(transcript)}" placeholder="Enter the correct name" class="border-input h-9 w-full rounded-md border bg-transparent px-3 py-1 text-base shadow-xs md:text-sm"></div>
-      <p data-err class="text-sm text-red-600 text-center"></p>
-      <div class="flex gap-2 justify-end pt-2">
-        <button data-close class="px-4 py-2 rounded-md border border-border text-sm font-medium hover:bg-muted">Cancel</button>
-        <button data-savename class="px-4 py-2 rounded-md text-sm font-medium bg-primary text-primary-foreground disabled:opacity-50">Save Name</button>
-      </div></div></div>`;
+  <div class="fixed left-[50%] top-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-3 rounded-lg border bg-background p-5 shadow-lg sm:max-w-md max-h-[85vh]">
+    <div class="flex flex-col gap-1"><h2 class="text-lg leading-none font-semibold">Which house is it?</h2>
+      <p class="text-muted-foreground text-sm">The phone heard: <span class="font-semibold text-foreground">"${esc(transcript)}"</span></p></div>
+    <input data-name placeholder="Type the name, e.g. Devenney" autocomplete="off" class="border-input h-10 w-full rounded-md border bg-transparent px-3 py-1 text-base">
+    <div data-opts class="space-y-2 overflow-y-auto" style="max-height:45vh"></div>
+    <p class="text-xs text-muted-foreground">Tap the right house. The app links "${esc(transcript)}" to it for good, on every phone.</p>
+    <p data-err class="text-sm text-red-600 text-center"></p>
+    <div class="flex justify-end"><button data-close class="px-4 py-2 rounded-md border border-border text-sm font-medium hover:bg-muted">Cancel</button></div>
+  </div>`;
   document.body.appendChild(el);
   const close = () => el.remove();
   $$("[data-close]", el).forEach(b => (b.onclick = close));
-  const save = async (stopId, label) => {
-    try { await onSave(transcript, stopId, label); close(); } catch (e) { $("[data-err]", el).textContent = e.message || "Failed to save name"; }
+  const nameEl = $("[data-name]", el), optsEl = $("[data-opts]", el);
+  let opts = [];
+  const draw = () => {
+    const q = nameEl.value.trim();
+    opts = (q ? searchStops(stops, q).results : searchStops(stops, transcript).results).slice(0, 8);
+    optsEl.innerHTML = opts.length ? opts.map(w => `<button data-pick="${w.id}" class="w-full p-3 text-left border-2 border-border rounded-lg hover:bg-accent transition-all"><div class="font-semibold text-base">${esc(w.businessName || splitPipe(w.residents).join(", ") || `Stop ${w.stopOrder}`)}</div><div class="text-xs text-muted-foreground">#${w.stopOrder}${w.road ? " · " + esc(w.road) : ""}${w.eircode ? " · " + esc(w.eircode) : ""}</div></button>`).join("")
+      : `<p class="text-sm text-muted-foreground text-center py-2">${q ? `No house matches "${esc(q)}"` : "Type the name to find the house"}</p>`;
   };
-  $$("[data-pick]", el).forEach(b => (b.onclick = () => { const s = opts.find(o => o.id === +b.dataset.pick); save(s.id, s.residents || `Stop ${s.stopOrder}`); }));
-  const nameEl = $("[data-name]", el);
-  $("[data-savename]", el).onclick = () => { const v = nameEl.value.trim(); if (!v) return ($("[data-err]", el).textContent = "Please enter a name"); save(0, v); };
-  nameEl.addEventListener("keydown", e => { if (e.key === "Enter") $("[data-savename]", el).click(); });
+  optsEl.onclick = async e => {
+    const b = e.target.closest("[data-pick]"); if (!b) return;
+    const st = opts.find(o => o.id === +b.dataset.pick); b.disabled = true;
+    try { await onSave(transcript, st.id, st.businessName || splitPipe(st.residents)[0] || `Stop ${st.stopOrder}`); close(); }
+    catch (x) { b.disabled = false; $("[data-err]", el).textContent = x.message || "Couldn't save — try again"; }
+  };
+  nameEl.oninput = draw; draw(); setTimeout(() => nameEl.focus(), 50);
 }
 
 /* =====================================================================
@@ -1123,6 +1169,13 @@ function renderRoute(B) {
   /* resolve a spoken name to exactly one stop (or null + results) */
   const nameFor = (stop, t) => { const cp = coupleNames(t); return cp ? spokenName(stop, matchStop(stop, cp[0]).matched ? matchStop(stop, cp[0]) : matchStop(stop, cp[1])) : spokenName(stop, matchStop(stop, t)); };
   async function resolve(t) {
+    const r1 = await resolveOnce(t);
+    if (r1.stop && !r1.weak) return r1;
+    const t2 = irishVersion(t);
+    if (t2) { const r2 = await resolveOnce(t2); if (r2.stop && !r2.weak) return r2; if (!r1.results.length && r2.results.length) return r2; }
+    return r1;
+  }
+  async function resolveOnce(t) {
     const P = pool(); if (!P.length) return { stop: null, results: [], level: 0 };
     const special = (eircodeMatches(P, t) || coupleNames(t)) ? searchStops(P, t) : null;
     if (special && special.results.length) return { stop: special.results.length === 1 ? special.results[0] : null, results: special.results, level: 1, multi: special.results.length > 1 };
@@ -1199,7 +1252,7 @@ function renderRoute(B) {
     S.lastCtx = ctx(t, r.level, r.results);
     const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
     if (r.ri) { const nm = nameFor(r.stop, t); S.query = nm || t; qEl.value = S.query; S.riPick = r.stop; drawList(); logLetter(r.stop); return say(callout(r.stop, nm), t, "found", r.stop, r.results, r.learned); }
-    if (!r.results.length) { say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: sectionStops(), onSave: saveName }); return; }
+    if (!r.results.length) { say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: all, onSave: saveName }); return; }
     if (r.level === 1 || r.level === 2) {
       if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
       logLetter(r.stop);
@@ -1210,7 +1263,9 @@ function renderRoute(B) {
   }
   async function saveName(transcript, stopId, label) {
     await ri.recordCorrection(transcript, stopId || 0, stopId ? ["user-selected"] : []);
-    toast.success(`Saved: "${transcript}" → ${label}`);
+    toast.success(`Saved for good: "${transcript}" → ${label}`);
+    const st = all.find(x => x.id === stopId);
+    if (st) { S.query = label; qEl.value = label; S.riPick = st; drawList(); markCorrected(st); }
   }
 
   /* ---- parcels ---- */
@@ -1354,7 +1409,7 @@ function renderRoute(B) {
   }
   function drawHeader() {
     const sec = curSection();
-    $("[data-sub]").textContent = (share ? "Relief view · " : "") + (sec ? `Box ${sec.boxNumber} · ${sec.name}` : "No sections yet");
+    $("[data-sub]").textContent = (share ? "Relief view · " : "") + (sec ? `Box ${sec.boxNumber} · ${sec.name}` : "No sections yet") + " · " + APP_VERSION;
     drawTabs();
     $$("[data-mode]").forEach(b => {
       b.className = `flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all ${S.mode === b.dataset.mode ? "bg-accent text-accent-foreground shadow" : "bg-white/10 text-primary-foreground hover:bg-white/20"}`;
