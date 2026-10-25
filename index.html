@@ -398,9 +398,10 @@ class LocalLearning {
 
 /* Name words, with Mc/Mac/O joined to the surname: "Mc Enhill" → "macenhill", "O Driscoll" → "odriscoll" */
 function nameWords(x) {
-  const w = String(x || "").toLowerCase().replace(/[’']/g, "").replace(/[^a-z\s]/g, " ").split(/\s+/).filter(Boolean), out = [];
+  const w = String(x || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[’']/g, "").replace(/[^a-z\s]/g, " ").split(/\s+/).filter(Boolean), out = [];
   for (let i = 0; i < w.length; i++) {
-    if ((w[i] === "mc" || w[i] === "mac" || w[i] === "o") && w[i + 1]) { out.push((w[i] === "o" ? "o" : "mac") + w[i + 1].replace(/^ma?c/, "")); i++; }
+    if ((w[i] === "mc" || w[i] === "mac") && w[i + 1]) { out.push("mac" + w[i + 1].replace(/^ma?c/, "")); i++; }
+    else if (["o", "nic", "ni", "ui", "ua", "mhic", "de", "di"].includes(w[i]) && w[i + 1]) { out.push(w[i] + w[i + 1]); i++; }   // Irish surnames: Nic Conchoille, Ní Bhaoill, Ó Dónaill
     else out.push(w[i].replace(/^mc/, "mac"));
   }
   return out;
@@ -468,7 +469,7 @@ class RouteIntelligence {
   }
   normalize(r) {
     const filler = ["ah", "right", "ok", "okay", "for", "the", "a", "and", "or", "but", "hold", "on", "just", "sake", "god", "gods"];
-    return r ? r.toLowerCase().split(/\s+/).filter(a => !filler.includes(a)).join("").replace(/^mc/i, "mac").replace(/['\-\s]/g, "") : "";
+    return r ? r.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().split(/\s+/).filter(a => !filler.includes(a)).join("").replace(/^mc/i, "mac").replace(/['\-\s]/g, "") : "";
   }
   /* Every name this route has ever learned is loaded once (and saved on the phone for offline).
      A learned mishearing then works forever — and near-misses of it work too. */
@@ -602,7 +603,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v19";
+const APP_VERSION = "v20";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
