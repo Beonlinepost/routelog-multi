@@ -866,6 +866,7 @@ async function tabField(body) {
     if (hours) q = q.gte("created_at", new Date(Date.now() - hours * 3600e3).toISOString());
     const { data: ev = [], error } = await q;
     if (error) return (inner.innerHTML = `<div class="${card} text-destructive">${esc(error.message)}</div>`);
+    try { const { data: cs } = await sb.from("corrections").select("normalized_transcript").eq("route_id", A.routeSel).not("stop_id", "is", null).limit(5000); lockedSet = new Set((cs || []).map(c => c.normalized_transcript)); } catch {}
     draw(ev || []);
   };
   const badge = o => o.manual_correction_made ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-700">Corrected</span>`
@@ -876,8 +877,8 @@ async function tabField(body) {
     : o.outcome === "no-match" ? `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">No match</span>`
     : `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-700">Corrected</span>`;
   // A tap on the phone already saves the name for good — so a "Corrected" row, or a miss that was later found from what it learned, is already sorted
-  let learnedOk = new Set();
-  const isLearned = o => o.manual_correction_made || learnedOk.has((o.original_transcript || "").trim().toLowerCase());
+  let learnedOk = new Set(), lockedSet = new Set();
+  const isLearned = o => o.manual_correction_made || learnedOk.has((o.original_transcript || "").trim().toLowerCase()) || lockedSet.has((o.original_transcript || "").trim().toLowerCase().replace(/\s+/g, " "));
   const isIssue = o => !o.fixed && !isLearned(o) && (o.outcome === "no-match" || o.outcome === "list");
   function draw(all) {
     learnedOk = new Set(all.filter(x => x.manual_correction_made || (x.outcome === "found" && x.learned_mapping_used)).map(x => (x.original_transcript || "").trim().toLowerCase()));
@@ -900,12 +901,22 @@ async function tabField(body) {
           <td class="py-2 pr-3 text-muted-foreground">${esc(o.spoken || "")}</td>
           <td class="py-2 pr-3">${badge(o)}${o.learned_mapping_used ? ` <span class="text-xs text-muted-foreground">learned</span>` : ""}</td>
           <td class="py-2 pr-3">${st ? `${esc(st.business_name || splitPipe(st.residents)[0] || "")}<div class="text-xs text-muted-foreground">#${st.stop_order}</div>` : esc(o.selected_stop_name || "—")}</td>
-          <td class="py-2 whitespace-nowrap">${!o.fixed && isLearned(o) && o.outcome !== "found" ? `<span class="text-xs text-emerald-700 font-semibold mr-2" title="The postman's tap saved this for good">Learned ✓</span><button data-pick="${o.id}" class="${btnOutline} !py-1 text-xs">Wrong house?</button>` : o.fixed ? `<span class="text-xs text-emerald-700 font-semibold mr-2">Fixed ✓</span><button data-undo="${o.id}" class="${btnOutline} !py-1 text-xs" title="Take it back — the app forgets what it learned from this">Undo</button>` : `
-            ${o.original_transcript ? `<button data-pick="${o.id}" class="${isIssue(o) ? btnPrimary : btnOutline} !py-1 text-xs" title="Pick the right house — the app will remember this forever">${isIssue(o) ? "Fix" : "Wrong house?"}</button>` : ""}
+          <td class="py-2 whitespace-nowrap">${!o.fixed && isLearned(o) && o.outcome !== "found" ? `<span class="text-xs text-emerald-700 font-semibold mr-2" title="The postman's tap saved this for good">Learned ✓</span><button data-pick="${o.id}" class="text-xs text-muted-foreground underline ml-1">change</button>` : o.fixed ? `<span class="text-xs text-emerald-700 font-semibold mr-2">Fixed ✓</span><button data-undo="${o.id}" class="${btnOutline} !py-1 text-xs" title="Take it back — the app forgets what it learned from this">Undo</button>` : `
+            ${o.original_transcript && isIssue(o) ? `<button data-pick="${o.id}" class="${btnPrimary} !py-1 text-xs" title="Pick the right house — the app will remember this forever">Fix</button>` : ""}
+            ${o.original_transcript && !isIssue(o) && o.outcome === "found" && o.selected_stop_id ? (isLearned(o) || o.learned_mapping_used ? `<span class="text-xs text-emerald-700 font-semibold mr-1">Learned ✓</span>` : `<button data-lock="${o.id}" class="${btnOutline} !py-1 text-xs" title="Right house — save it so it's always found">Lock in ✓</button>`) + ` <button data-pick="${o.id}" class="text-xs text-muted-foreground underline ml-1" title="Only if the app picked the wrong house">change</button>` : ""}
             ${canAlias ? `<button data-alias="${o.id}" class="${btnOutline} !py-1 text-xs" title="Adds what the phone heard to this house's aliases, so it's found next time">+ Add as alias</button>` : ""}
             ${isIssue(o) ? `<button data-fix="${o.id}" class="${btnOutline} !py-1 text-xs" title="Not a name (chat, noise) — just hide it">Ignore</button>` : ""}`}</td></tr>`;
       }).join("")}</tbody></table>${ev.length > 300 ? `<p class="text-xs text-muted-foreground mt-2">Showing latest 300 of ${ev.length}</p>` : ""}</div>
-      <div class="flex gap-2"><button data-csv class="${btnOutline}">${icon("download", 16)}Export CSV</button><button data-clear class="${btnDanger}">${icon("trash", 16)}Clear log</button></div>`;
+      <div class="flex gap-2 flex-wrap"><button data-lockall class="${btnPrimary}" title="Save every found name (2+ words) so it's always found">Lock in all found</button><button data-csv class="${btnOutline}">${icon("download", 16)}Export CSV</button><button data-clear class="${btnDanger}">${icon("trash", 16)}Clear log</button></div>`;
+    $("[data-lockall]", inner)?.addEventListener("click", async () => {
+      const seen = new Set(), todo = all.filter(o => o.outcome === "found" && o.selected_stop_id && !isLearned(o) && !o.learned_mapping_used && (o.original_transcript || "").trim().split(/\s+/).length >= 2)
+        .filter(o => { const k = o.original_transcript.trim().toLowerCase() + "|" + o.selected_stop_id; if (seen.has(k)) return false; seen.add(k); return true; });
+      if (!todo.length) return toast.success("Nothing new to lock in");
+      if (!confirm(`Lock in ${todo.length} found names? Check the "Right house" column first — any wrong ones would be saved too.`)) return;
+      let n = 0;
+      for (const o of todo) { const heard = o.original_transcript.trim(); const { error } = await sb.rpc("record_correction", { p_route_id: A.routeSel, p_stop_id: o.selected_stop_id, p_original: heard, p_normalized: heard.toLowerCase().replace(/\s+/g, " "), p_tags: ["locked-in"] }); if (!error) { n++; lockedSet.add(heard.toLowerCase().replace(/\s+/g, " ")); all.filter(x => x.original_transcript === o.original_transcript && x.selected_stop_id === o.selected_stop_id).forEach(x => (x.learned_mapping_used = true)); } }
+      draw(all); toast.success(`Locked in ${n} names`);
+    });
     $("[data-csv]", inner)?.addEventListener("click", () => downloadFile(`voice-searches-${A.routeSel}-${new Date().toISOString().slice(0, 10)}.csv`, toCSV([["Time", "Mode", "Relief", "Heard", "App said", "Result", "Corrected", "Right house", "Reply ms"],
       ...all.map(o => [o.created_at, o.app_mode, o.by_relief ? "yes" : "", o.original_transcript, o.spoken, o.outcome, o.manual_correction_made ? "yes" : "", o.selected_stop_name, o.response_time_ms])]), "text/csv"));
     $("[data-clear]", inner)?.addEventListener("click", async () => { if (!confirm("Clear the voice search log for this route?")) return; const { error } = await sb.from("search_events").delete().eq("route_id", A.routeSel); if (error) return toast.error(error.message); toast.success("Cleared"); load(); });
@@ -925,6 +936,13 @@ async function tabField(body) {
         }
         await sb.from("search_events").update({ fixed: false }).eq("id", o.id);
         o.fixed = false; draw(all); return toast.success(`Undone — “${heard}” forgotten`);
+      }
+      const lk = e.target.closest("[data-lock]");
+      if (lk) {
+        const o = all.find(x => x.id === +lk.dataset.lock), heard = (o.original_transcript || "").trim();
+        const { error } = await sb.rpc("record_correction", { p_route_id: A.routeSel, p_stop_id: o.selected_stop_id, p_original: heard, p_normalized: heard.toLowerCase().replace(/\s+/g, " "), p_tags: ["admin"] });
+        if (error) return toast.error(error.message);
+        lockedSet.add(heard.toLowerCase().replace(/\s+/g, " ")); draw(all); return toast.success(`Locked in: “${heard}” → ${o.selected_stop_name || "house"}`);
       }
       const pk = e.target.closest("[data-pick]");
       if (pk) return pickHouse(all.find(x => x.id === +pk.dataset.pick));
