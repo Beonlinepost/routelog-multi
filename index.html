@@ -421,6 +421,11 @@ const IRISH_SOUNDS = {
   ronan: ["rownan"], donal: ["donald", "doughnal"], aodh: ["ay", "hugh"], aodhan: ["aidan", "aiden", "aedan"], caoilfhionn: ["keelin", "kaylin", "keelan"],
   eithne: ["enya", "ethna", "etna"], orlaith: ["orla", "orlah"], aine: ["anya", "onya", "awnya", "anja"], meabh: ["maeve", "mave"], blathnaid: ["blawnid", "blanid"],
   diarmuid: ["dermot", "dermid", "dearmid"], peadar: ["padder", "pader", "peter"], tomas: ["thomas", "tomás"], sean: ["shawn", "shaun", "shon"], seosamh: ["joseph"],
+  odhran: ["oran", "orin", "oren", "odran", "orrin", "orran", "oarn", "orinn", "oren", "aran"], cian: ["kian", "keon", "keyan", "keeon", "kean", "kyan", "keanu", "ian", "keen"],
+  eimear: ["emer", "eemer", "emma", "amir", "emir", "eamer", "ember", "eema", "imir"], aideen: ["adeen", "adine", "adina", "aideen", "ideen", "a dean", "adene", "aiden"],
+  roise: ["rosha", "rosie", "rose", "roshe", "rosa", "roshi", "roisha", "rosh"], bhaoill: ["wheel", "weel", "whale", "wil", "will", "boyle", "bweel", "veel"], ni: ["nee", "knee", "nie", "ne", "nay"],
+  morag: ["moraq", "maureg", "morrog", "moreg", "morak", "morog", "moragh"], owenie: ["oweny", "owney", "owny", "oney", "ohweenie", "ownie", "owenee", "oweenie", "o'weenie", "joanie", "toni"],
+  forker: ["forca", "forka", "forkor", "forcer", "porker", "focker", "forkner"], conal: ["connell", "conall", "connel", "conal"], ellen: ["helen", "allen", "elan", "ellan", "ellyn"],
   padraig: ["podrick", "podraig", "pawdrig", "pauric", "porig", "padrig", "paudrick", "podric", "poderick", "pordrick", "padrick", "padric", "patrick"],
   daithi: ["dahi", "dahee", "dawhee", "daahi", "dahey", "dohi", "doughy", "dahy", "darhi", "dahie", "daihi", "dahei", "dahee", "dye he", "dahhi", "david"],
   eabha: ["ava", "eva", "ayva", "aiva", "avah", "eava"], meabh: ["maeve", "mave", "maev"],
@@ -434,18 +439,22 @@ const IRISH_SOUNDS = {
 };
 const IRISH_FROM = (() => { const m = new Map(); Object.entries(IRISH_SOUNDS).forEach(([real, list]) => list.forEach(x => { if (!m.has(x)) m.set(x, []); if (!m.get(x).includes(real)) m.get(x).push(real); })); return m; })();
 /* Rewrite what the phone heard into Irish spellings: "Kiva McEnhall" → "caoimhe macenhill" (null if nothing changed) */
+const IRISH_PHRASES = [[/\bfork her\b/g, "forker"], [/\bnee wheel\b|\bknee wheel\b|\bnee weel\b|\bnew wheel\b|\bneat wheel\b/g, "ni bhaoill"], [/\bo weenie\b|\boh weenie\b|\bo eany\b/g, "owenie"], [/\bmac en hill\b|\bmc en hill\b|\bmack and hill\b|\bmac and hill\b/g, "mcenhill"], [/\bmac cafferty\b|\bmc cafferty\b/g, "mccafferty"]];
 function irishVersions(t) {
   let changed = false;
-  const opts = String(t || "").toLowerCase().replace(/[^a-z'\s]/g, " ").split(/\s+/).filter(Boolean).map(w => {
+  let base = String(t || "").toLowerCase();
+  IRISH_PHRASES.forEach(([re, to]) => { if (re.test(base)) { base = base.replace(re, to); changed = true; } re.lastIndex = 0; });
+  const opts = base.replace(/[^a-z'\s]/g, " ").split(/\s+/).filter(Boolean).map(w => {
     const mc = /^ma?c/.test(w) && w.length > 4 ? w.replace(/^ma?c/, "") : null;
     if (IRISH_FROM.has(w)) { changed = true; return [...IRISH_FROM.get(w), w]; }
     if (mc && IRISH_FROM.has(mc)) { changed = true; return [...IRISH_FROM.get(mc).map(x => "mc" + x), w]; }
     return [w];
   });
   if (!changed) return [];
+  if (opts.every(o => o.length === 1)) return [opts.map(o => o[0]).join(" ")];
   let out = [""];
   opts.forEach(o => { out = out.flatMap(p => o.map(x => (p ? p + " " : "") + x)); });
-  return out.filter(x => x !== String(t).toLowerCase().trim()).slice(0, 6);
+  return out.filter(x => x !== String(t).toLowerCase().trim()).slice(0, 12);
 }
 function irishVersion(t) { return irishVersions(t)[0] || null; }
 /* Drop leading filler the phone picks up: "and Campbell", "on Deveney", "to McCall" */
@@ -593,7 +602,7 @@ class RouteIntelligence {
           return;
         }
         const R = confidence(raw, M);
-        if (R >= threshold && fuzzyCount < (RI_CFG.maxFuzzyResults ?? 10) * 5) {
+        if (R >= threshold) {   // score every name, then keep the best (a cap here dropped the right house on busy surnames)
           const c = prio * Math.min(R, wordScore(E, M));
           E.stopIds.forEach(T => { const prev = out.get(T); if (!prev) { fuzzyCount++; out.set(T, { stopId: T, confidence: c, matchType: "fuzzy", term: M }); } else if (prev.matchType === "fuzzy" && prev.confidence < c) prev.confidence = c; });
         }
@@ -645,7 +654,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v22";
+const APP_VERSION = "v23";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
@@ -1219,7 +1228,12 @@ function renderRoute(B) {
   };
   async function resolve(t) {
     const r1 = await resolveOnce(t);
-    if (r1.stop && !r1.weak) return r1;
+    if (r1.stop && !r1.weak && (!r1.ri || r1.sure)) return r1;
+    if (r1.stop && !r1.weak) {
+      // a sound-alike guess: if the Irish spelling gives an exact name ("Owney" → Owenie), that wins
+      for (const t2 of irishVersions(t)) { const r2 = await resolveOnce(t2); if (r2.stop && r2.sure) return r2; }
+      return r1;
+    }
     let alt = null, altGuess = null;
     for (const t2 of irishVersions(t)) {
       const r2 = await resolveOnce(t2);
@@ -1237,7 +1251,7 @@ function renderRoute(B) {
     const special = (eircodeMatches(P, t) || coupleNames(t)) ? searchStops(P, t) : null;
     if (special && special.results.length) return { stop: special.results.length === 1 ? special.results[0] : null, results: special.results, level: 1, multi: special.results.length > 1 };
     if (RI_CFG.enabled !== false) {
-      try { const rr = await ri.search(t), hit = pickConfident(rr, P); if (hit) return { stop: hit, results: [hit], level: 3, ri: true, learned: /learned/.test(rr.find(x => x.stopId === hit.id)?.matchType || "") }; riGuess = rr; }
+      try { const rr = await ri.search(t), hit = pickConfident(rr, P); if (hit) { const mt = rr.find(x => x.stopId === hit.id)?.matchType || ""; return { stop: hit, results: [hit], level: 3, ri: true, learned: /learned/.test(mt), sure: /learned|exact/.test(mt) }; } riGuess = rr; }
       catch (x) { console.warn("[RI] search failed, falling back:", x); }
     }
     const { level, results } = searchStops(P, t);
