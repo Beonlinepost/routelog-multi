@@ -807,13 +807,13 @@ async function tabMappings(body) {
   const conf = n => Math.min(0.5 + n * 0.1, 0.85);
   const tot = rows.reduce((s, r) => s + r.confirmation_count, 0);
   inner.innerHTML = `<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-    ${[["Total Mappings", rows.length], ["Total Confirmations", tot], ["Avg Confidence", rows.length ? (rows.reduce((s, r) => s + conf(r.confirmation_count), 0) / rows.length * 100).toFixed(0) + "%" : "—"]].map(([l, v]) => `<div class="p-4 bg-card rounded-lg border border-border"><div class="text-sm text-muted-foreground">${l}</div><div class="text-3xl font-bold text-foreground mt-2">${v}</div></div>`).join("")}</div>
+    ${[["Total Mappings", rows.length], ["Total Confirmations", tot], ["Status", rows.length ? "100% — all permanent" : "—"]].map(([l, v]) => `<div class="p-4 bg-card rounded-lg border border-border"><div class="text-sm text-muted-foreground">${l}</div><div class="text-3xl font-bold text-foreground mt-2">${v}</div></div>`).join("")}</div>
   <div class="${card} overflow-x-auto">
     <div class="flex gap-2 mb-4"><button data-exp class="${btnOutline}">${icon("download", 16)}Export JSON</button><button data-clearall class="${btnDanger}">${icon("trash", 16)}Clear all</button></div>
-    ${rows.length ? `<table class="w-full text-sm"><thead><tr class="text-left text-muted-foreground border-b border-border"><th class="py-2 pr-3">Normalized Transcript</th><th class="py-2 pr-3">Original</th><th class="py-2 pr-3">Stop</th><th class="py-2 pr-3">Confirmations</th><th class="py-2 pr-3">Confidence</th><th class="py-2">Action</th></tr></thead>
+    ${rows.length ? `<table class="w-full text-sm"><thead><tr class="text-left text-muted-foreground border-b border-border"><th class="py-2 pr-3">Normalized Transcript</th><th class="py-2 pr-3">Original</th><th class="py-2 pr-3">Stop</th><th class="py-2 pr-3">Times used/confirmed</th><th class="py-2 pr-3">Status</th><th class="py-2">Action</th></tr></thead>
     <tbody>${rows.map(r => `<tr class="border-b border-border"><td class="py-2 pr-3 font-mono text-xs">${esc(r.normalized_transcript)}</td><td class="py-2 pr-3">${esc(r.original_transcript)}</td>
       <td class="py-2 pr-3">${r.stop_id ? `${esc(names.get(r.stop_id) || "?")} <span class="text-xs text-muted-foreground">#${r.stop_id}</span>` : `<span class="text-xs text-muted-foreground">typed name, no stop</span>`}</td>
-      <td class="py-2 pr-3">${r.confirmation_count}</td><td class="py-2 pr-3">${(conf(r.confirmation_count) * 100).toFixed(0)}%</td>
+      <td class="py-2 pr-3">${r.confirmation_count}</td><td class="py-2 pr-3">${r.stop_id ? `<span class="text-xs font-semibold text-emerald-700">Permanent ✓ 100%</span>` : `<span class="text-xs text-muted-foreground">No house</span>`}</td>
       <td class="py-2"><button data-del="${r.id}" class="p-1.5 rounded hover:bg-destructive/10 text-destructive">${icon("trash", 15)}</button></td></tr>`).join("")}</tbody></table>`
       : `<p class="text-center text-muted-foreground py-6">No learned mappings for this route yet</p>`}</div>`;
   $("[data-exp]", inner).onclick = () => downloadFile(`learned-mappings-${A.routeSel}-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(rows, null, 2));
