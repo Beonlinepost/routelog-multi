@@ -310,31 +310,41 @@ const RI_DEFAULTS = {
 };
 let RI_CFG = { ...RI_DEFAULTS };
 
-function levenshtein(t, r) {
-  const a = [];
-  for (let o = 0; o <= r.length; o++) a[o] = [o];
-  for (let o = 0; o <= t.length; o++) a[0][o] = o;
-  for (let o = 1; o <= r.length; o++) for (let l = 1; l <= t.length; l++)
-    a[o][l] = r.charAt(o - 1) === t.charAt(l - 1) ? a[o - 1][l - 1] : Math.min(a[o - 1][l - 1] + 1, a[o][l - 1] + 1, a[o - 1][l] + 1);
-  return a[r.length][t.length];
+let _lvA = new Uint16Array(64), _lvB = new Uint16Array(64);
+function levenshtein(t, r) {   // same result as before, two rows instead of a full table (much faster on phones)
+  const n = t.length, m = r.length; if (!n) return m; if (!m) return n;
+  if (_lvA.length <= n) { _lvA = new Uint16Array(n + 1); _lvB = new Uint16Array(n + 1); }
+  let prev = _lvA, cur = _lvB;
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i; const rc = r.charCodeAt(i - 1);
+    for (let j = 1; j <= n; j++) { const sub = prev[j - 1] + (t.charCodeAt(j - 1) === rc ? 0 : 1), del = prev[j] + 1, ins = cur[j - 1] + 1; cur[j] = sub < del ? (sub < ins ? sub : ins) : (del < ins ? del : ins); }
+    const tmp = prev; prev = cur; cur = tmp;
+  }
+  return prev[n];
 }
 function levSim(t, r) { const m = Math.max(t.length, r.length); return m === 0 ? 1 : 1 - levenshtein(t, r) / m; }
-function jaroWinkler(t, r) {
-  const a = t.toLowerCase().trim(), o = r.toLowerCase().trim();
-  if (a === o) return 1; if (!a.length || !o.length) return 0;
-  const l = Math.floor(Math.max(a.length, o.length) / 2) - 1, c = new Array(a.length).fill(false), u = new Array(o.length).fill(false);
+let _jwA = new Uint8Array(64), _jwB = new Uint8Array(64);
+function jaroWinkler(t, r) {   // same result as before, without allocating on every call
+  const a = /[A-Z\s]/.test(t) ? t.toLowerCase().trim() : t, o = /[A-Z\s]/.test(r) ? r.toLowerCase().trim() : r;
+  if (a === o) return 1; const al = a.length, ol = o.length; if (!al || !ol) return 0;
+  if (_jwA.length < al) _jwA = new Uint8Array(al * 2); if (_jwB.length < ol) _jwB = new Uint8Array(ol * 2);
+  const c = _jwA, u = _jwB; c.fill(0, 0, al); u.fill(0, 0, ol);
+  const l = Math.floor(Math.max(al, ol) / 2) - 1;
   let f = 0, p = 0;
-  for (let M = 0; M < a.length; M++) { const w = Math.max(0, M - l), R = Math.min(M + l + 1, o.length);
-    for (let T = w; T < R; T++) if (!u[T] && a[M] === o[T]) { c[M] = true; u[T] = true; f++; break; } }
+  for (let M = 0; M < al; M++) { const w = Math.max(0, M - l), R = Math.min(M + l + 1, ol), ch = a.charCodeAt(M);
+    for (let T = w; T < R; T++) if (!u[T] && ch === o.charCodeAt(T)) { c[M] = 1; u[T] = 1; f++; break; } }
   if (f === 0) return 0;
   let g = 0;
-  for (let M = 0; M < a.length; M++) if (c[M]) { while (!u[g]) g++; if (a[M] !== o[g]) p++; g++; }
-  const y = (f / a.length + f / o.length + (f - p / 2) / f) / 3;
-  let v = 0; for (let M = 0; M < Math.min(4, a.length, o.length) && a[M] === o[M]; M++) v++;
+  for (let M = 0; M < al; M++) if (c[M]) { while (!u[g]) g++; if (a.charCodeAt(M) !== o.charCodeAt(g)) p++; g++; }
+  const y = (f / al + f / ol + (f - p / 2) / f) / 3;
+  let v = 0; for (let M = 0; M < Math.min(4, al, ol) && a.charCodeAt(M) === o.charCodeAt(M); M++) v++;
   return y + v * 0.1 * (1 - y);
 }
 /* Double-metaphone-lite with Irish prefixes (O', Mac, Mc) stripped */
-function metaphone(t) {
+const _mpCache = new Map();
+function metaphone(t) { const k = String(t); let v = _mpCache.get(k); if (!v) { v = metaphoneRaw(k); if (_mpCache.size > 20000) _mpCache.clear(); _mpCache.set(k, v); } return v; }
+function metaphoneRaw(t) {
   if (!t || !t.trim().length) return ["", ""];
   const r = t.toUpperCase().trim().replace(/[^A-Z']/g, "").replace(/^O'/, "O").replace(/^MAC/, "M").replace(/^MC/, "M");
   if (!r.length) return ["", ""];
@@ -385,7 +395,8 @@ function metaSim(t, r) {
   const u = (p, g) => p.split("").filter((y, v) => y === g[v]).length;
   return Math.max(u(a, l), u(o, c)) / 4;
 }
-function confidence(t, r) { return Math.min(jaroWinkler(t, r) * 0.4 + levSim(t, r) * 0.3 + metaSim(t, r) * 0.3, 1); }
+const _cfCache = new Map();
+function confidence(t, r) { const k = t + "\u0001" + r; let v = _cfCache.get(k); if (v === undefined) { v = Math.min(jaroWinkler(t, r) * 0.4 + levSim(t, r) * 0.3 + metaSim(t, r) * 0.3, 1); if (_cfCache.size > 200000) _cfCache.clear(); _cfCache.set(k, v); } return v; }
 const normTranscript = t => t.trim().toLowerCase().replace(/\s+/g, " ");
 
 class LocalLearning {
@@ -397,7 +408,9 @@ class LocalLearning {
 }
 
 /* Name words, with Mc/Mac/O joined to the surname: "Mc Enhill" → "macenhill", "O Driscoll" → "odriscoll" */
-function nameWords(x) {
+const _nwCache = new Map();
+function nameWords(x) { const k = String(x || ""); let v = _nwCache.get(k); if (!v) { v = nameWordsRaw(k); if (_nwCache.size > 20000) _nwCache.clear(); _nwCache.set(k, v); } return v; }
+function nameWordsRaw(x) {
   const w = String(x || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[’']/g, "").replace(/[^a-z\s]/g, " ").split(/\s+/).filter(Boolean), out = [];
   for (let i = 0; i < w.length; i++) {
     if ((w[i] === "mc" || w[i] === "mac") && w[i + 1]) { out.push("mac" + w[i + 1].replace(/^ma?c/, "")); i++; }
@@ -454,7 +467,7 @@ function irishVersions(t) {
   if (opts.every(o => o.length === 1)) return [opts.map(o => o[0]).join(" ")];
   let out = [""];
   opts.forEach(o => { out = out.flatMap(p => o.map(x => (p ? p + " " : "") + x)); });
-  return out.filter(x => x !== String(t).toLowerCase().trim()).slice(0, 12);
+  return out.filter(x => x !== String(t).toLowerCase().trim()).slice(0, 4);
 }
 function irishVersion(t) { return irishVersions(t)[0] || null; }
 /* Drop leading filler the phone picks up: "and Campbell", "on Deveney", "to McCall" */
@@ -492,6 +505,7 @@ class RouteIntelligence {
     this.index = { fullNames: new Map(), surnames: new Map(), firstNames: new Map(), addresses: new Map(), roads: new Map(), aliases: new Map(), tags: new Map() };
   }
   build(stops) {
+    this._sc = new Map();
     Object.values(this.index).forEach(m => m.clear()); this.stops.clear();
     stops.forEach(s => { this.stops.set(s.id, s); this.indexStop(s); });
   }
@@ -564,6 +578,15 @@ class RouteIntelligence {
     return hit;
   }
   async search(raw) {
+    const ck = String(raw || "").trim().toLowerCase();
+    if (!this._sc) this._sc = new Map();
+    if (this._sc.has(ck)) return this._sc.get(ck);
+    const res = await this.searchRaw(raw);
+    if (this._sc.size > 500) this._sc.clear();
+    this._sc.set(ck, res);
+    return res;
+  }
+  async searchRaw(raw) {
     const threshold = RI_CFG.fuzzyMatchingThreshold ?? 0.65;
     const o = this.normalize(raw); if (!o) return [];
     const out = new Map();
@@ -612,7 +635,7 @@ class RouteIntelligence {
   }
   async recordCorrection(transcript, stopId, tags = ["user-selected"]) {
     const n = normTranscript(transcript);
-    this.cache.delete(n);
+    this.cache.delete(n); this._sc = new Map();
     this.learning.record(transcript, stopId, 0.9, "user-selected");
     if (this.token && !stopId) return;   // relief link can't save free-typed names
     this.cache.set(n, stopId ? { stopId, confidence: 0.95 } : null);
@@ -654,7 +677,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v23";
+const APP_VERSION = "v24";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
@@ -720,7 +743,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     speakingEnd(len = 0) {
       clear();
       const ios = /iPad|iPhone|iPod/.test(navigator.userAgent), mobile = ios || /Android/i.test(navigator.userAgent);
-      const d = mobile && len > 0 ? 300 : ios ? 200 : 80;
+      const d = mobile && len > 0 ? 200 : ios ? 150 : 60;
       set("restarting");
       timer = setTimeout(() => {
         if (want) { set("listening"); retries = 0; if (rec) try { rec.start(); } catch (x) { vlog("Restart after TTS failed", x); } }
@@ -1207,7 +1230,7 @@ function renderRoute(B) {
     const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     u.volume = 1;
     const go = () => { guard = setTimeout(() => { console.warn("[Voice] utterance.onend never fired — forcing mic restart"); fin(); }, 400 + wd * 2); try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.speechSynthesis.speak(u); } catch (e) { console.warn("[Voice] speak failed", e); fin(); } };
-    (voice.whenMicOff ? voice.whenMicOff(700) : Promise.resolve()).then(() => setTimeout(go, ios ? 250 : 60));
+    (voice.whenMicOff ? voice.whenMicOff(400) : Promise.resolve()).then(() => setTimeout(go, ios ? 120 : 40));
   }
   function callout(stop, name) {
     const p = [];
