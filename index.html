@@ -263,7 +263,16 @@ function searchStops(stops, raw) {
     const f = RI_CFG.enableAliasMatching !== false ? stops.filter(p => matchAliasMulti(p, q) !== null) : [];
     return f.length ? { level: 2, results: f } : { level: 0, results: [] };
   }
-  return { level: 3, results: stops.filter(u => matchSingle(u, q, RI_CFG) !== null) };
+  return { level: 3, results: rankByWord(stops.filter(u => matchSingle(u, q, RI_CFG) !== null), q) };
+}
+/* Houses where the typed word is a whole name ("Rua") come first, then names starting with it, then the rest */
+function rankByWord(list, q) {
+  const w = String(q || "").toLowerCase().trim(); if (!w || list.length < 2) return list;
+  const score = st => {
+    const words = [st.residents, st.businessName, st.aliases].filter(Boolean).join(" ").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().split(/[^a-z']+/).filter(Boolean);
+    return words.includes(w) ? 3 : words.some(x => x.startsWith(w)) ? 2 : 1;
+  };
+  return list.map((st, i) => [st, score(st), i]).sort((a, b) => b[1] - a[1] || a[2] - b[2]).map(x => x[0]);
 }
 function spokenName(stop, m) {
   if (m.kind === "business" && m.matchedBusiness) return m.matchedBusiness;
@@ -436,7 +445,7 @@ const IRISH_SOUNDS = {
   diarmuid: ["dermot", "dermid", "dearmid"], peadar: ["padder", "pader", "peter"], tomas: ["thomas", "tomás"], sean: ["shawn", "shaun", "shon"], seosamh: ["joseph"],
   odhran: ["oran", "orin", "oren", "odran", "orrin", "orran", "oarn", "orinn", "oren", "aran"], cian: ["kian", "keon", "keyan", "keeon", "kean", "kyan", "keanu", "ian", "keen"],
   eimear: ["emer", "eemer", "emma", "amir", "emir", "eamer", "ember", "eema", "imir"], aideen: ["adeen", "adine", "adina", "aideen", "ideen", "a dean", "adene", "aiden"],
-  roise: ["rosha", "rosie", "rose", "roshe", "rosa", "roshi", "roisha", "rosh"], bhaoill: ["wheel", "weel", "whale", "wil", "will", "boyle", "bweel", "veel"], ni: ["nee", "knee", "nie", "ne", "nay"],
+  rua: ["ruah", "rooa", "ruha", "rue a", "ruba", "roo"], roise: ["rosha", "rosie", "rose", "roshe", "rosa", "roshi", "roisha", "rosh"], bhaoill: ["wheel", "weel", "whale", "wil", "will", "boyle", "bweel", "veel"], ni: ["nee", "knee", "nie", "ne", "nay"],
   morag: ["moraq", "maureg", "morrog", "moreg", "morak", "morog", "moragh"], owenie: ["oweny", "owney", "owny", "oney", "ohweenie", "ownie", "owenee", "oweenie", "o'weenie", "joanie", "toni"],
   forker: ["forca", "forka", "forkor", "forcer", "porker", "focker", "forkner"], conal: ["connell", "conall", "connel", "conal"], ellen: ["helen", "allen", "elan", "ellan", "ellyn"],
   padraig: ["podrick", "podraig", "pawdrig", "pauric", "porig", "padrig", "paudrick", "podric", "poderick", "pordrick", "padrick", "padric", "patrick"],
@@ -452,7 +461,7 @@ const IRISH_SOUNDS = {
 };
 const IRISH_FROM = (() => { const m = new Map(); Object.entries(IRISH_SOUNDS).forEach(([real, list]) => list.forEach(x => { if (!m.has(x)) m.set(x, []); if (!m.get(x).includes(real)) m.get(x).push(real); })); return m; })();
 /* Rewrite what the phone heard into Irish spellings: "Kiva McEnhall" → "caoimhe macenhill" (null if nothing changed) */
-const IRISH_PHRASES = [[/\bfork her\b/g, "forker"], [/\bnee wheel\b|\bknee wheel\b|\bnee weel\b|\bnew wheel\b|\bneat wheel\b/g, "ni bhaoill"], [/\bo weenie\b|\boh weenie\b|\bo eany\b/g, "owenie"], [/\bmac en hill\b|\bmc en hill\b|\bmack and hill\b|\bmac and hill\b/g, "mcenhill"], [/\bmac cafferty\b|\bmc cafferty\b/g, "mccafferty"]];
+const IRISH_PHRASES = [[/\bfork her\b/g, "forker"], [/\bnee wheel\b|\bknee wheel\b|\bnee weel\b|\bnew wheel\b|\bneat wheel\b|\bnivio\b|\bnivea\b|\bneevil\b|\bnivel\b|\bnee vil\b|\bknievel\b|\bnee will\b/g, "ni bhaoill"], [/\bo weenie\b|\boh weenie\b|\bo eany\b/g, "owenie"], [/\bmac en hill\b|\bmc en hill\b|\bmack and hill\b|\bmac and hill\b/g, "mcenhill"], [/\bmac cafferty\b|\bmc cafferty\b/g, "mccafferty"]];
 function irishVersions(t) {
   let changed = false;
   let base = String(t || "").toLowerCase();
@@ -677,7 +686,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v33";
+const APP_VERSION = "v34";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
