@@ -677,7 +677,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v27";
+const APP_VERSION = "v28";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
@@ -779,6 +779,21 @@ function typeBadge(t) {
   const cls = { Residential: "bg-slate-100 text-slate-600", Business: "bg-purple-100 text-purple-700", "Holiday House": "bg-sky-100 text-sky-700", Vacant: "bg-orange-100 text-orange-700" }[t.trim()] ?? "bg-gray-100 text-gray-600";
   return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs ${cls}">${esc(t.trim())}</span>`;
 }
+/* Green flash on the house that was picked, so the postman sees it was taken */
+function flashCard(stopId, label = "✓ Got it") {
+  const apply = () => {
+    const el = document.querySelector(`[data-stop-id="${stopId}"]`); if (!el) return;
+    el.classList.add("rl-picked");
+    let b = el.querySelector(".rl-picked-badge");
+    if (!b) { b = document.createElement("div"); b.className = "rl-picked-badge"; el.prepend(b); }
+    b.textContent = label;
+    clearTimeout(el._rlT); el._rlT = setTimeout(() => { el.classList.remove("rl-picked"); b.remove(); }, 2500);
+  };
+  setTimeout(apply, 0); setTimeout(apply, 250);
+}
+if (!document.getElementById("rl-picked-css")) { const st = document.createElement("style"); st.id = "rl-picked-css";
+  st.textContent = ".rl-picked{border-color:#16a34a!important;box-shadow:0 0 0 3px #16a34a!important;background:#f0fdf4!important;transition:all .2s}.rl-picked-badge{display:inline-block;margin-bottom:6px;padding:2px 8px;border-radius:9999px;background:#16a34a;color:#fff;font-weight:700;font-size:12px}";
+  document.head.appendChild(st); }
 function stopCardHTML(t, q = "", canTap = false) {
   const residents = splitPipe(t.residents), aliases = visibleAliases(splitPipe(t.aliases), residents);
   const isBiz = t.propertyType === "Business", pi = primaryIndex(t, q), primary = residents[pi] ?? residents[0] ?? "";
@@ -788,6 +803,7 @@ function stopCardHTML(t, q = "", canTap = false) {
   return `<div ${canTap ? 'role="button" tabindex="0"' : ""} data-stop-id="${t.id}" class="stop-card bg-white rounded-xl border shadow-sm px-3 py-3 transition-all select-none ${canTap ? "active:scale-[0.98] cursor-pointer" : ""} ${ring}">
     <div class="flex items-center gap-1.5 mb-2 flex-wrap">
       <span class="text-xs font-bold text-muted-foreground shrink-0 min-w-[1.5rem]">#${t.stopOrder}</span>
+      ${searching && window.__boxOf && window.__boxOf.get(t.sectionId) != null ? `<span class="px-1.5 py-0.5 rounded text-xs font-bold" style="background:#1e293b;color:#fff">Box ${window.__boxOf.get(t.sectionId)}</span>` : ""}
       ${sideBadge(t.side)}${typeBadge(t.propertyType)}
       ${t.hasDog ? `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">🐕 Dog Warning</span>` : ""}
       ${t.safePlace ? `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs font-semibold bg-yellow-100 text-yellow-800">📦 Drop-Off</span>` : ""}
@@ -1155,6 +1171,7 @@ function renderRoute(B) {
   const { route, routeId, token } = B, share = !!token;
   RI_CFG = { ...RI_DEFAULTS, ...(route.settings || {}) };
   const sections = B.sections.map(toSection);
+  window.__boxOf = new Map(sections.map(x => [x.id, x.boxNumber]));
   let all = B.stops.map(toStop);
   const canEdit = !share && B.canEdit && !B.offlineEditsBlocked;
   let parcels = (B.parcels || []).map(p => ({ id: p.id, stopId: p.stop_id ?? p.stopId, count: p.count, kind: p.kind || "parcel" }));
@@ -1357,7 +1374,7 @@ function renderRoute(B) {
     const r = await resolve(t);
     S.lastCtx = ctx(t, r.level, r.results);
     const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
-    if (r.ri) { const nm = nameFor(r.stop, t); S.query = nm || t; qEl.value = S.query; S.riPick = r.stop; drawList(); logLetter(r.stop); return say(callout(r.stop, nm), t, "found", r.stop, r.results, r.learned); }
+    if (r.ri) { const nm = nameFor(r.stop, t); S.query = nm || t; qEl.value = S.query; S.riPick = r.stop; drawList(); flashCard(r.stop.id, `✓ Box ${window.__boxOf?.get(r.stop.sectionId) ?? ""}`); logLetter(r.stop); return say(callout(r.stop, nm), t, "found", r.stop, r.results, r.learned); }
     if (!r.results.length) {
       if (looksLikeChatter(t)) { S.query = ""; qEl.value = ""; drawList(); logSearch(t, "chatter", "", null, []); return; }   // not a name — stay quiet
       say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: all, onSave: saveName }); return;
@@ -1369,7 +1386,7 @@ function renderRoute(B) {
     }
     if (r.level === 1 || r.level === 2) {
       if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
-      logLetter(r.stop);
+      logLetter(r.stop); flashCard(r.stop.id, `✓ Box ${window.__boxOf?.get(r.stop.sectionId) ?? ""}`);
       return say(callout(r.stop, nameFor(r.stop, t)), t, "found", r.stop, r.results);
     }
     if (S.mode === "delivery") { const s0 = r.results[0]; return say(callout(s0, spokenName(s0, matchStop(s0, t))), t, "found", s0, r.results); }
@@ -1649,6 +1666,7 @@ function renderRoute(B) {
     sb.rpc("mark_search_corrected", { p_id: id, p_token: token, p_stop_id: stop.id, p_stop_name: stop.businessName || splitPipe(stop.residents)[0] || "" }).then(() => {}, () => {});
   }
   function onTap(stop) {
+    flashCard(stop.id, `✓ Box ${window.__boxOf?.get(stop.sectionId) ?? ""}`);
     if (S.mode === "parcel" || (S.pendingParcel && S.pendingParcel.until > Date.now())) {
       const pending = S.pendingParcel?.until > Date.now();
       const n = pending ? S.pendingParcel.count : 1;
@@ -1664,6 +1682,8 @@ function renderRoute(B) {
       if (shouldLearn(c, stop)) ri.recordCorrection(c.transcript, stop.id).catch(x => console.warn("[Learning] Failed to record correction:", x));
       S.lastCtx = null;
     }
+    // read back the house that was tapped, so the postman hears what was picked
+    try { const heard = (c && c.transcript) || S.query || ""; speak(callout(stop, heard ? nameFor(stop, heard) : (stop.businessName || splitPipe(stop.residents)[0] || ""))); } catch {}
     if (canEdit) openEdit(stop);
   }
   async function exportMappings() {
