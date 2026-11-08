@@ -677,7 +677,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v26";
+const APP_VERSION = "v27";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
@@ -757,8 +757,6 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       timer = setTimeout(go, d);
     },
     prime() {
-      // only once per page: speaking while the mic starts made iPhones slow to start listening
-      if (window.__rlPrimed) return; window.__rlPrimed = true;
       if (/iPad|iPhone|iPod/.test(navigator.userAgent) && "speechSynthesis" in window) {
         try { window.speechSynthesis.resume?.(); const u = new SpeechSynthesisUtterance("ok"); u.volume = 0.01; u.rate = 2; window.speechSynthesis.speak(u); } catch {}
       }
@@ -1238,7 +1236,7 @@ function renderRoute(B) {
     const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     u.volume = 1;
     const go = () => { guard = setTimeout(() => { console.warn("[Voice] utterance.onend never fired — forcing mic restart"); fin(); }, 400 + wd * 2); try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.speechSynthesis.speak(u); } catch (e) { console.warn("[Voice] speak failed", e); fin(); } };
-    (voice.whenMicOff ? voice.whenMicOff(600) : Promise.resolve()).then(() => setTimeout(go, ios ? 200 : 40));
+    (voice.whenMicOff ? voice.whenMicOff(700) : Promise.resolve()).then(() => setTimeout(go, ios ? 300 : 40));
   }
   function callout(stop, name) {
     const p = [];
