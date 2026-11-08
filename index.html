@@ -677,7 +677,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v30";
+const APP_VERSION = "v31";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -823,7 +823,7 @@ function stopCardHTML(t, q = "", canTap = false) {
     ${t.road ? `<p class="mt-0.5 text-[11px] text-muted-foreground/60"><span class="font-semibold uppercase tracking-wide">Route Ref:</span> ${esc(t.road)}</p>` : ""}
     ${t.safePlace ? `<p class="mt-1.5 text-xs font-medium text-yellow-900 bg-yellow-50 border border-yellow-200 rounded-md px-2 py-1">Parcel drop-off: ${esc(t.safePlace)}</p>` : ""}
     ${t.notes && !searching ? `<p class="mt-1.5 text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-2 py-1 whitespace-pre-line">${esc(t.notes)}</p>` : ""}
-    ${canTap ? `<div class="mt-2 flex justify-end"><span class="text-[10px] text-muted-foreground/50">tap to edit</span></div>` : ""}
+    ${canTap ? `<div class="mt-2 flex justify-end"><span class="text-xs text-muted-foreground">✏️ tap to edit</span></div>` : ""}
   </div>`;
 }
 
@@ -844,7 +844,7 @@ function confirmDialog(title, body, okLabel = "Delete") {
 }
 
 /* ---------- Edit Stop modal (port of EditStopModal.tsx) ---------- */
-function openEditModal({ stop, section, isNew, onSaved, onClose }) {
+function openEditModal({ stop, section, isNew, onSaved, onClose, token }) {
   let aliases = splitPipe(stop.aliases), dog = !!stop.hasDog;
   const Vr = "w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary";
   const Ub = Vr + " resize-none";
@@ -920,7 +920,10 @@ function openEditModal({ stop, section, isNew, onSaved, onClose }) {
     };
     const btn = $("[data-save]", el); btn.disabled = true; $("span", btn).textContent = "Saving…";
     let data, error;
-    try { ({ data, error } = await sb.from("stops").update(row).eq("id", stop.id).select().single()); } catch (e) { error = e; }
+    try {
+      if (token) { const res = await sb.rpc("update_stop_public", { p_token: token, p_stop_id: stop.id, p_row: row }); error = res.error; data = Array.isArray(res.data) ? res.data[0] : res.data; if (!error && !data) error = { message: "Not saved" }; }
+      else ({ data, error } = await sb.from("stops").update(row).eq("id", stop.id).select().single());
+    } catch (e) { error = e; }
     if (error && OFF.isNetErr(error)) {
       OFF.push({ type: "update", id: stop.id, row });
       toast.success("Saved on this phone — will sync when there's signal");
@@ -1120,10 +1123,10 @@ async function loadMemberBundle(routeId) {
 async function loadShareBundle(token) {
   const cacheKey = `rl-share-${token}`;
   try {
-    const [{ data, error }, p, d] = await Promise.all([sb.rpc("get_public_summary", { p_token: token }), sb.rpc("parcels_today_public", { p_token: token }), sb.rpc("deliveries_today_public", { p_token: token })]);
+    const [{ data, error }, p, d, ce] = await Promise.all([sb.rpc("get_public_summary", { p_token: token }), sb.rpc("parcels_today_public", { p_token: token }), sb.rpc("deliveries_today_public", { p_token: token }), sb.rpc("share_can_edit", { p_token: token }).then(x => x, () => ({ data: false }))]);
     if (error) throw error;
     if (!data) return null;
-    const b = { route: data.route, sections: data.sections, stops: data.stops, canEdit: false, parcels: p?.data || [], deliveries: d?.data || [], day: todayStr(), savedAt: Date.now() };
+    const b = { route: data.route, sections: data.sections, stops: data.stops, canEdit: false, shareEdit: !!ce?.data, parcels: p?.data || [], deliveries: d?.data || [], day: todayStr(), savedAt: Date.now() };
     try { localStorage.setItem(cacheKey, JSON.stringify(b)); } catch {}
     return b;
   } catch (e) {
@@ -1180,6 +1183,7 @@ function renderRoute(B) {
   window.__boxOf = new Map(sections.map(x => [x.id, x.boxNumber]));
   let all = B.stops.map(toStop);
   const canEdit = !share && B.canEdit && !B.offlineEditsBlocked;
+  const shareEdit = share && !!B.shareEdit;   // test/relief link may edit house details when the route allows it
   let parcels = (B.parcels || []).map(p => ({ id: p.id, stopId: p.stop_id ?? p.stopId, count: p.count, kind: p.kind || "parcel" }));
   const deliv = new Map((B.deliveries || []).map(d => [d.stop_id, d.status]));
   const FT_KEY = "routelog:fieldTestMode";
@@ -1607,7 +1611,7 @@ function renderRoute(B) {
         items.map(s => {
           let head = "";
           if (searching || S.parcelList) { const sec = sections.find(x => x.id === s.sectionId); if (sec && (!S.parcelList || sec.id !== lastSec)) head = `<p class="text-xs font-semibold text-primary/60 px-1 pt-1 pb-0.5">Box ${sec.boxNumber} · ${esc(sec.name)}</p>`; lastSec = sec?.id; }
-          return `<div>${head}${parcelBadge(s)}${stopCardHTML(s, S.parcelList ? "" : S.query, canEdit || tapMode)}</div>`;
+          return `<div>${head}${parcelBadge(s)}${stopCardHTML(s, S.parcelList ? "" : S.query, canEdit || shareEdit || tapMode)}</div>`;
         }).join("");
       if (tapMode) $$(".stop-card [class*='text-[10px]']", listEl).forEach(e => (e.textContent = S.mode === "parcel" ? "tap to add a parcel" : "tap to log parcel"));
     }
@@ -1658,6 +1662,7 @@ function renderRoute(B) {
   function openEdit(stop, isNew = false) {
     let saved = false;
     openEditModal({
+      token: shareEdit ? token : null,
       stop, section: sections.find(x => x.id === stop.sectionId) || curSection(), isNew,
       onSaved: ns => { saved = true; all = all.map(x => (x.id === ns.id ? ns : x)); ri.build(all); cacheStops(); drawList(); },
       onClose: () => { if (isNew && !saved) deleteStop(stop.id, true); }
@@ -1690,7 +1695,7 @@ function renderRoute(B) {
     }
     // read back the house that was tapped, so the postman hears what was picked
     try { const heard = (c && c.transcript) || S.query || ""; speak(callout(stop, heard ? nameFor(stop, heard) : (stop.businessName || splitPipe(stop.residents)[0] || ""))); } catch {}
-    if (canEdit) openEdit(stop);
+    if (canEdit || shareEdit) openEdit(stop);
   }
   async function exportMappings() {
     const { data = [], error } = await sb.from("corrections").select("*").eq("route_id", routeId).order("confirmation_count", { ascending: false });
