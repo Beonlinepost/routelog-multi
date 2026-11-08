@@ -677,7 +677,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v24";
+const APP_VERSION = "v25";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
@@ -751,6 +751,8 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       }, d);
     },
     prime() {
+      // only once per page: speaking while the mic starts made iPhones slow to start listening
+      if (window.__rlPrimed) return; window.__rlPrimed = true;
       if (/iPad|iPhone|iPod/.test(navigator.userAgent) && "speechSynthesis" in window) {
         try { window.speechSynthesis.resume?.(); const u = new SpeechSynthesisUtterance("ok"); u.volume = 0.01; u.rate = 2; window.speechSynthesis.speak(u); } catch {}
       }
@@ -1691,7 +1693,7 @@ function renderRoute(B) {
   };
   const unlock = () => {
     try {
-      window.speechSynthesis.cancel(); window.speechSynthesis.resume?.();
+      window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.__rlPrimed = true;
       const u = new SpeechSynthesisUtterance("Sound on"); const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = "en-GB";
       u.onend = () => toast.success("🔊 Sound is working"); u.onerror = ev => toast.error("Sound blocked (" + (ev.error || "error") + ") — check the silent switch and volume");
       window.speechSynthesis.speak(u);
