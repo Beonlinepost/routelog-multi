@@ -686,7 +686,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v35";
+const APP_VERSION = "v36";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -705,6 +705,10 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
   const micOff = () => { micOn = false; audioOn = false; const w = idleWaiters; idleWaiters = []; w.forEach(f => f()); };
   const set = s => { st = s; onState(s); };
   const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  // iPhone sometimes "listens" but never sends any words back (it can sit like that for 30–60s).
+  // If nothing at all comes back for 5 seconds, swap in a fresh mic — so the worst wait is ~5s, not a minute.
+  let deafTimer = null;
+  const armDeaf = () => { clearTimeout(deafTimer); deafTimer = setTimeout(() => { if (want && st === "listening") { vlog("No words for 4s — fresh mic"); api.fresh(); } }, 4000); };
   const ready = () => { audioOn = true; if (tapAt) { const ms = Date.now() - tapAt; tapAt = 0; try { api.onReady && api.onReady(ms); } catch {} } };
   function ensure() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -718,9 +722,10 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     };
     rec.onstart = () => { micOn = true; vlog("Recognition started"); retries = 0; lastInterim = ""; gotFinal = false; set("listening"); if (!("onaudiostart" in rec)) ready(); };
     // the phone is really hearing you only from here — the mic turns red and says "Talk"
-    rec.onaudiostart = () => { audioOn = true; ready(); onState(st); };
+    rec.onaudiostart = () => { audioOn = true; ready(); onState(st); armDeaf(); };
     rec.onaudioend = () => { audioOn = false; onState(st); };
     rec.onresult = e => {
+      armDeaf();
       let interim = "", fin = "";
       for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; e.results[i].isFinal ? (fin += t) : (interim += t); }
       if (interim) { lastInterim = interim; onTranscript(interim, false);
@@ -730,6 +735,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       else if (fin) { clearTimeout(silenceTimer); gotFinal = true; lastInterim = ""; vlog("Final transcript", fin); onTranscript(fin, true); }
     };
     rec.onend = () => {
+      clearTimeout(deafTimer);
       micOff();
       finishInterim("end");
       clear();
@@ -765,14 +771,14 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       ensure(); if (rec && want) { set("listening"); try { rec.start(); } catch (x) { vlog("Fresh start error", x); } }
     },
     reset() {   // app went to the background: drop the mic completely so it starts clean next time
-      want = false; clear();
+      want = false; clear(); clearTimeout(deafTimer);
       const old = rec; rec = null; micOn = false; audioOn = false;
       if (old) { try { old.onend = old.onerror = old.onresult = old.onstart = old.onaudiostart = old.onaudioend = null; old.abort(); } catch {} }
       set("idle");
     },
-    stop() { want = false; clear(); if (rec) try { rec.abort(); } catch {} set("idle"); },
+    stop() { want = false; clear(); clearTimeout(deafTimer); if (rec) try { rec.abort(); } catch {} set("idle"); },
     toggle() { st === "idle" ? api.start() : api.stop(); },
-    speakingStart() { clear(); set("speaking"); if (rec) try { rec.abort(); } catch {} },
+    speakingStart() { clear(); clearTimeout(deafTimer); set("speaking"); if (rec) try { rec.abort(); } catch {} },
     // iPhone: the speaker stays silent while the mic still holds the audio — wait until the mic has really let go
     whenMicOff(max = 700) { return new Promise(res => { if (!micOn) return res(); const t = setTimeout(() => { micOn = false; res(); }, max); idleWaiters.push(() => { clearTimeout(t); res(); }); }); },
     speakingEnd(len = 0) {
