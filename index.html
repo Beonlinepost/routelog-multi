@@ -438,7 +438,7 @@ const IRISH_SOUNDS = {
   seamus: ["shamus", "shaymus", "seamous"], ciara: ["kiera", "keira", "kira", "chiara"], ciaran: ["kieran", "kiran", "keiran"], dearbhla: ["dervla", "derbla", "dervala"],
   maire: ["moira", "maura", "moya"], brid: ["bridge", "breed", "breej", "bride"], caitlin: ["kathleen", "kotchlin", "catlin"], sorcha: ["sorka", "sorrca"],
   grainne: ["grania", "granya", "grawnya", "grainya"], cathal: ["cahal", "kahal", "cohal"], donnacha: ["donagh", "dunaka", "donaka"], oisin: ["osheen", "usheen", "ushin"],
-  tadhg: ["tige", "tiger", "taig", "teig"], fionnuala: ["finola", "fenola", "finnoula", "nuala"], mairead: ["maraid", "mared", "muraid", "mareid"], noirin: ["noreen", "norine"],
+  tadhg: ["tige", "tiger", "taig", "teig"], fionnuala: ["finola", "fenola", "finnoula", "nuala"], mairead: ["maraid", "mared", "muraid", "mareid", "mermaid", "married", "worried", "mairead", "maireag", "mireid", "marade", "mirade", "merrid", "marid", "merit", "marred", "myriad", "marit", "mairid", "more"], noirin: ["noreen", "norine"],
   eamon: ["amon", "aymon", "eamonn"], aisling: ["ashling", "ashlin", "ashley"], clodagh: ["cloda", "clodah"], muireann: ["mirren", "murrin", "miriam"],
   ronan: ["rownan"], donal: ["donald", "doughnal"], aodh: ["ay", "hugh"], aodhan: ["aidan", "aiden", "aedan"], caoilfhionn: ["keelin", "kaylin", "keelan"],
   eithne: ["enya", "ethna", "etna"], orlaith: ["orla", "orlah"], aine: ["anya", "onya", "awnya", "anja"], meabh: ["maeve", "mave"], blathnaid: ["blawnid", "blanid"],
@@ -461,7 +461,7 @@ const IRISH_SOUNDS = {
 };
 const IRISH_FROM = (() => { const m = new Map(); Object.entries(IRISH_SOUNDS).forEach(([real, list]) => list.forEach(x => { if (!m.has(x)) m.set(x, []); if (!m.get(x).includes(real)) m.get(x).push(real); })); return m; })();
 /* Rewrite what the phone heard into Irish spellings: "Kiva McEnhall" → "caoimhe macenhill" (null if nothing changed) */
-const IRISH_PHRASES = [[/\bfork her\b/g, "forker"], [/\bnee wheel\b|\bknee wheel\b|\bnee weel\b|\bnew wheel\b|\bneat wheel\b|\bnivio\b|\bnivea\b|\bneevil\b|\bnivel\b|\bnee vil\b|\bknievel\b|\bnee will\b/g, "ni bhaoill"], [/\bo weenie\b|\boh weenie\b|\bo eany\b/g, "owenie"], [/\bmac en hill\b|\bmc en hill\b|\bmack and hill\b|\bmac and hill\b/g, "mcenhill"], [/\bmac cafferty\b|\bmc cafferty\b/g, "mccafferty"]];
+const IRISH_PHRASES = [[/\bfork her\b/g, "forker"], [/\bnee wheel\b|\bknee wheel\b|\bnee weel\b|\bnew wheel\b|\bneat wheel\b|\bnivio\b|\bnivea\b|\bneevil\b|\bnivel\b|\bnee vil\b|\bknievel\b|\bnee will\b/g, "ni bhaoill"], [/\bo weenie\b|\boh weenie\b|\bo eany\b/g, "owenie"], [/\bmy red\b|\bmy raid\b|\bmare ad\b|\bmar aid\b|\bmore aid\b|\bmy rad\b/g, "mairead"], [/\bmac en hill\b|\bmc en hill\b|\bmack and hill\b|\bmac and hill\b/g, "mcenhill"], [/\bmac cafferty\b|\bmc cafferty\b/g, "mccafferty"]];
 function irishVersions(t) {
   let changed = false;
   let base = String(t || "").toLowerCase();
@@ -686,7 +686,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v34";
+const APP_VERSION = "v35";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -751,7 +751,25 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     get state() { return st; },
     get hearing() { return audioOn; },
     markTap() { tapAt = Date.now(); },
-    start() { if (st !== "idle") return; ensure(); if (!rec) return; want = true; retries = 0; clear(); try { rec.start(); } catch (x) { vlog("Start error", x); } },
+    start() {
+      if (st !== "idle") return; ensure(); if (!rec) return; want = true; retries = 0; clear();
+      try { rec.start(); } catch (x) { vlog("Start error", x); }
+      // watchdog: if the iPhone hasn't really started within 1.5s, throw the old mic away and start a fresh one
+      let kicks = 0;
+      const dog = () => { if (!want || micOn) return; if (++kicks > 4) return; vlog("Mic slow to start — fresh restart", kicks); api.fresh(); setTimeout(dog, 1500); };
+      setTimeout(dog, 1500);
+    },
+    fresh() {   // brand-new recogniser (the old one can get stuck after the app was in the background)
+      const old = rec; rec = null; micOn = false; audioOn = false;
+      if (old) { try { old.onend = old.onerror = old.onresult = old.onstart = old.onaudiostart = old.onaudioend = null; old.abort(); } catch {} }
+      ensure(); if (rec && want) { set("listening"); try { rec.start(); } catch (x) { vlog("Fresh start error", x); } }
+    },
+    reset() {   // app went to the background: drop the mic completely so it starts clean next time
+      want = false; clear();
+      const old = rec; rec = null; micOn = false; audioOn = false;
+      if (old) { try { old.onend = old.onerror = old.onresult = old.onstart = old.onaudiostart = old.onaudioend = null; old.abort(); } catch {} }
+      set("idle");
+    },
     stop() { want = false; clear(); if (rec) try { rec.abort(); } catch {} set("idle"); },
     toggle() { st === "idle" ? api.start() : api.stop(); },
     speakingStart() { clear(); set("speaking"); if (rec) try { rec.abort(); } catch {} },
@@ -1266,6 +1284,11 @@ function renderRoute(B) {
   /* ---- speech out ---- */
   const voice = createVoice((t, fin) => onTranscript(t, fin), e => { if (/not-allowed/.test(String(e)) && !S.micDirect) { S.micDirect = true; S.voiceErr = "Tap the mic again"; try { voice.stop(); } catch {} } else S.voiceErr = e; drawHeader(); }, () => drawMic());
   voice.onReady = ms => { S.searchStart = Date.now() - ms; logSearch("(mic switched on)", "mic-start", `Mic ready in ${(ms / 1000).toFixed(1)}s`, null, []); drawMic(); };
+  if (!window.__rlVisHook) { window.__rlVisHook = true;
+    const away = () => { try { window.__rlVoice && window.__rlVoice.reset(); window.speechSynthesis?.cancel(); } catch {} };
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") away(); });
+    window.addEventListener("pagehide", away); }
+  window.__rlVoice = voice;
   function speak(text) {
     if (!("speechSynthesis" in window)) return;
     voice.speakingStart();
