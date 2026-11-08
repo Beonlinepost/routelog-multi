@@ -677,8 +677,10 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v28";
-function sayable(t) { return String(t || "").replace(/\|/g, ","); }
+const APP_VERSION = "v29";
+/* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
+const MC_SAYS = "M'";
+function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
   if (_voice) return _voice;
