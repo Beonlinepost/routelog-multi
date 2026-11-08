@@ -677,7 +677,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v29";
+const APP_VERSION = "v30";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -758,10 +758,14 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       };
       timer = setTimeout(go, d);
     },
-    prime() {
+    prime(then) {
+      // iPhone needs a tiny sound in the tap to allow spoken replies — but the mic must only start once that sound has finished,
+      // otherwise the two fight and the mic takes ages to start listening
+      let done = false; const fin = () => { if (!done) { done = true; then && then(); } };
       if (/iPad|iPhone|iPod/.test(navigator.userAgent) && "speechSynthesis" in window) {
-        try { window.speechSynthesis.resume?.(); const u = new SpeechSynthesisUtterance("ok"); u.volume = 0.01; u.rate = 2; window.speechSynthesis.speak(u); } catch {}
-      }
+        try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); const u = new SpeechSynthesisUtterance("ok"); u.volume = 0.01; u.rate = 2; u.onend = fin; u.onerror = fin; window.speechSynthesis.speak(u); } catch { fin(); }
+        setTimeout(fin, 500);
+      } else fin();
     },
     destroy() { want = false; clear(); if (rec) try { rec.abort(); } catch {} }
   };
@@ -1241,7 +1245,7 @@ function renderRoute(B) {
   let sortable = null;
 
   /* ---- speech out ---- */
-  const voice = createVoice((t, fin) => onTranscript(t, fin), e => { S.voiceErr = e; drawHeader(); }, () => drawMic());
+  const voice = createVoice((t, fin) => onTranscript(t, fin), e => { if (/not-allowed/.test(String(e)) && !S.micDirect) { S.micDirect = true; S.voiceErr = "Tap the mic again"; try { voice.stop(); } catch {} } else S.voiceErr = e; drawHeader(); }, () => drawMic());
   function speak(text) {
     if (!("speechSynthesis" in window)) return;
     voice.speakingStart();
@@ -1713,9 +1717,10 @@ function renderRoute(B) {
   qEl.oninput = () => { S.query = qEl.value; S.riPick = null; S.parcelList = false; drawList(); riVisual(); };
   $("[data-clear]").onclick = () => { S.query = ""; qEl.value = ""; S.riPick = null; window.speechSynthesis?.cancel(); drawList(); };
   $("[data-mic]").onpointerdown = () => {
-    voice.prime();
-    if (voice.state === "listening" || voice.state === "speaking") { voice.toggle(); S.query = ""; qEl.value = ""; window.speechSynthesis?.cancel(); drawList(); }
-    else voice.toggle();
+    if (voice.state !== "idle") { voice.toggle(); S.query = ""; qEl.value = ""; window.speechSynthesis?.cancel(); drawList(); return; }
+    S.voiceErr = null; drawHeader();
+    if (S.micDirect) { voice.prime(); voice.toggle(); }   // this phone needs the mic started inside the tap itself
+    else voice.prime(() => voice.toggle());
   };
   const unlock = () => {
     try {
