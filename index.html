@@ -677,7 +677,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v25";
+const APP_VERSION = "v26";
 function sayable(t) { return String(t || "").replace(/\|/g, ","); }
 function pickVoice() {
   if (!("speechSynthesis" in window)) return null;
@@ -743,12 +743,18 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     speakingEnd(len = 0) {
       clear();
       const ios = /iPad|iPhone|iPod/.test(navigator.userAgent), mobile = ios || /Android/i.test(navigator.userAgent);
-      const d = mobile && len > 0 ? 200 : ios ? 150 : 60;
+      const d = mobile && len > 0 ? 350 : ios ? 300 : 60;
       set("restarting");
-      timer = setTimeout(() => {
-        if (want) { set("listening"); retries = 0; if (rec) try { rec.start(); } catch (x) { vlog("Restart after TTS failed", x); } }
-        else set("idle");
-      }, d);
+      // iPhone sometimes refuses to restart the mic straight after speaking — keep trying until it really starts
+      let tries = 0;
+      const go = () => {
+        if (!want) return set("idle");
+        set("listening"); retries = 0;
+        if (micOn) return;   // already listening
+        try { rec && rec.start(); } catch (x) { vlog("Restart after TTS failed", x); }
+        if (++tries < 8) timer = setTimeout(() => { if (want && !micOn && st !== "speaking") go(); }, 700);
+      };
+      timer = setTimeout(go, d);
     },
     prime() {
       // only once per page: speaking while the mic starts made iPhones slow to start listening
@@ -1232,7 +1238,7 @@ function renderRoute(B) {
     const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     u.volume = 1;
     const go = () => { guard = setTimeout(() => { console.warn("[Voice] utterance.onend never fired — forcing mic restart"); fin(); }, 400 + wd * 2); try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.speechSynthesis.speak(u); } catch (e) { console.warn("[Voice] speak failed", e); fin(); } };
-    (voice.whenMicOff ? voice.whenMicOff(400) : Promise.resolve()).then(() => setTimeout(go, ios ? 120 : 40));
+    (voice.whenMicOff ? voice.whenMicOff(600) : Promise.resolve()).then(() => setTimeout(go, ios ? 200 : 40));
   }
   function callout(stop, name) {
     const p = [];
