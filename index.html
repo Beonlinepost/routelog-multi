@@ -677,7 +677,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v32";
+const APP_VERSION = "v33";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -829,7 +829,7 @@ function stopCardHTML(t, q = "", canTap = false) {
     ${t.road ? `<p class="mt-0.5 text-[11px] text-muted-foreground/60"><span class="font-semibold uppercase tracking-wide">Route Ref:</span> ${esc(t.road)}</p>` : ""}
     ${t.safePlace ? `<p class="mt-1.5 text-xs font-medium text-yellow-900 bg-yellow-50 border border-yellow-200 rounded-md px-2 py-1">Parcel drop-off: ${esc(t.safePlace)}</p>` : ""}
     ${t.notes && !searching ? `<p class="mt-1.5 text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-2 py-1 whitespace-pre-line">${esc(t.notes)}</p>` : ""}
-    ${canTap ? `<div class="mt-2 flex justify-end"><span class="text-xs text-muted-foreground">✏️ tap to edit</span></div>` : ""}
+    ${canTap ? `<div class="mt-2 flex justify-end"><span class="text-xs text-muted-foreground">✏️ tap twice to edit</span></div>` : ""}
   </div>`;
 }
 
@@ -1685,7 +1685,10 @@ function renderRoute(B) {
     sb.rpc("mark_search_corrected", { p_id: id, p_token: token, p_stop_id: stop.id, p_stop_name: stop.businessName || splitPipe(stop.residents)[0] || "" }).then(() => {}, () => {});
   }
   function onTap(stop) {
-    flashCard(stop.id, `✓ Box ${window.__boxOf?.get(stop.sectionId) ?? ""}`);
+    // first tap picks the house; tapping the same house again within 8 seconds opens the edit box
+    if ((canEdit || shareEdit) && S.picked && S.picked.id === stop.id && Date.now() - S.picked.at < 8000 && S.mode !== "parcel") { S.picked = null; return openEdit(stop); }
+    S.picked = { id: stop.id, at: Date.now() };
+    flashCard(stop.id, `✓ Box ${window.__boxOf?.get(stop.sectionId) ?? ""}${canEdit || shareEdit ? " · tap again to edit" : ""}`);
     if (S.mode === "parcel" || (S.pendingParcel && S.pendingParcel.until > Date.now())) {
       const pending = S.pendingParcel?.until > Date.now();
       const n = pending ? S.pendingParcel.count : 1;
@@ -1703,7 +1706,6 @@ function renderRoute(B) {
     }
     // read back the house that was tapped, so the postman hears what was picked
     try { const heard = (c && c.transcript) || S.query || ""; speak(callout(stop, heard ? nameFor(stop, heard) : (stop.businessName || splitPipe(stop.residents)[0] || ""))); } catch {}
-    if (canEdit || shareEdit) openEdit(stop);
   }
   async function exportMappings() {
     const { data = [], error } = await sb.from("corrections").select("*").eq("route_id", routeId).order("confirmation_count", { ascending: false });
