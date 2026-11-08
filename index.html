@@ -677,7 +677,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v31";
+const APP_VERSION = "v32";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -692,10 +692,11 @@ function pickVoice() {
 }
 if ("speechSynthesis" in window) { try { window.speechSynthesis.getVoices(); window.speechSynthesis.onvoiceschanged = () => { _voice = null; pickVoice(); }; } catch {} }
 function createVoice(onTranscript, onError, onState, lang = "en-IE") {
-  let rec = null, want = false, st = "idle", timer = null, retries = 0, micOn = false, idleWaiters = [];
-  const micOff = () => { micOn = false; const w = idleWaiters; idleWaiters = []; w.forEach(f => f()); };
+  let rec = null, want = false, st = "idle", timer = null, retries = 0, micOn = false, idleWaiters = [], audioOn = false, tapAt = 0;
+  const micOff = () => { micOn = false; audioOn = false; const w = idleWaiters; idleWaiters = []; w.forEach(f => f()); };
   const set = s => { st = s; onState(s); };
   const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  const ready = () => { audioOn = true; if (tapAt) { const ms = Date.now() - tapAt; tapAt = 0; try { api.onReady && api.onReady(ms); } catch {} } };
   function ensure() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { onError("Speech recognition not supported in this browser."); return; }
@@ -706,7 +707,10 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       clearTimeout(silenceTimer);
       if (!gotFinal && lastInterim.trim()) { vlog("Using last heard words as final (" + why + ")", lastInterim); gotFinal = true; const t = lastInterim; lastInterim = ""; onTranscript(t, true); }
     };
-    rec.onstart = () => { micOn = true; vlog("Recognition started"); retries = 0; lastInterim = ""; gotFinal = false; set("listening"); };
+    rec.onstart = () => { micOn = true; vlog("Recognition started"); retries = 0; lastInterim = ""; gotFinal = false; set("listening"); if (!("onaudiostart" in rec)) ready(); };
+    // the phone is really hearing you only from here — the mic turns red and says "Talk"
+    rec.onaudiostart = () => { audioOn = true; ready(); onState(st); };
+    rec.onaudioend = () => { audioOn = false; onState(st); };
     rec.onresult = e => {
       let interim = "", fin = "";
       for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; e.results[i].isFinal ? (fin += t) : (interim += t); }
@@ -736,6 +740,8 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
   }
   const api = {
     get state() { return st; },
+    get hearing() { return audioOn; },
+    markTap() { tapAt = Date.now(); },
     start() { if (st !== "idle") return; ensure(); if (!rec) return; want = true; retries = 0; clear(); try { rec.start(); } catch (x) { vlog("Start error", x); } },
     stop() { want = false; clear(); if (rec) try { rec.abort(); } catch {} set("idle"); },
     toggle() { st === "idle" ? api.start() : api.stop(); },
@@ -1250,6 +1256,7 @@ function renderRoute(B) {
 
   /* ---- speech out ---- */
   const voice = createVoice((t, fin) => onTranscript(t, fin), e => { if (/not-allowed/.test(String(e)) && !S.micDirect) { S.micDirect = true; S.voiceErr = "Tap the mic again"; try { voice.stop(); } catch {} } else S.voiceErr = e; drawHeader(); }, () => drawMic());
+  voice.onReady = ms => { S.searchStart = Date.now() - ms; logSearch("(mic switched on)", "mic-start", `Mic ready in ${(ms / 1000).toFixed(1)}s`, null, []); drawMic(); };
   function speak(text) {
     if (!("speechSynthesis" in window)) return;
     voice.speakingStart();
@@ -1537,10 +1544,11 @@ function renderRoute(B) {
   /* ---- drawing ---- */
   function drawMic() {
     const b = $("[data-mic]"); if (!b) return;
-    const st = voice.state, on = st === "listening";
-    b.title = on ? "Stop listening" : st === "speaking" ? "Speaking…" : "Voice search";
-    b.className = `shrink-0 p-2 rounded-full transition-all ${on ? "bg-red-500 text-white animate-pulse" : st === "speaking" ? "bg-accent text-accent-foreground animate-pulse" : "bg-white/20 text-primary-foreground hover:bg-white/30"}`;
-    b.innerHTML = icon(on ? "micOff" : "mic", 16);
+    const st = voice.state, on = st === "listening" || st === "restarting", hear = on && voice.hearing;
+    b.title = hear ? "Listening — talk now" : on ? "Starting the mic…" : st === "speaking" ? "Speaking…" : "Voice search";
+    b.className = `shrink-0 px-2 py-2 rounded-full transition-all flex items-center gap-1 ${hear ? "bg-red-500 text-white" : on ? "text-white animate-pulse" : st === "speaking" ? "bg-accent text-accent-foreground animate-pulse" : "bg-white/20 text-primary-foreground hover:bg-white/30"}`;
+    b.style.background = on && !hear ? "#d97706" : "";
+    b.innerHTML = icon(hear || on ? "micOff" : "mic", 16) + (hear ? `<span style="font-size:11px;font-weight:800">TALK</span>` : on ? `<span style="font-size:11px;font-weight:800">WAIT</span>` : "");
   }
   function drawTabs() {
     $("[data-tabs]").innerHTML = sections.map(x => {
@@ -1722,6 +1730,7 @@ function renderRoute(B) {
   qEl.oninput = () => { S.query = qEl.value; S.riPick = null; S.parcelList = false; drawList(); riVisual(); };
   $("[data-clear]").onclick = () => { S.query = ""; qEl.value = ""; S.riPick = null; window.speechSynthesis?.cancel(); drawList(); };
   $("[data-mic]").onpointerdown = () => {
+    if (voice.state === "idle") voice.markTap();
     if (voice.state !== "idle") { voice.toggle(); S.query = ""; qEl.value = ""; window.speechSynthesis?.cancel(); drawList(); return; }
     S.voiceErr = null; drawHeader();
     if (S.micDirect) { voice.prime(); voice.toggle(); }   // this phone needs the mic started inside the tap itself

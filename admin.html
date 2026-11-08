@@ -832,7 +832,7 @@ function looksLikeChatter(t) {
 }
 const isChatter = o => o.outcome === "chatter" || (o.outcome === "no-match" && !o.manual_correction_made && looksLikeChatter(o.original_transcript));
 function fieldStats(ev) {
-  ev = ev.filter(o => !isChatter(o));
+  ev = ev.filter(o => !isChatter(o) && o.outcome !== "mic-start");
   const voice = ev.filter(e => e.outcome !== "box");
   const r = { totalSearches: ev.length, voiceSearches: voice.length, firstTime: 0, corrected: 0, noMatch: 0, list: 0, parcels: 0,
     successfulFirstTimeMatches: 0, searchesRequiringManualCorrection: 0, newLearnedMappingsCreated: 0, averageResponseTimeMs: 0,
@@ -891,7 +891,9 @@ async function tabField(body) {
   let learnedOk = new Set(), lockedSet = new Set();
   const isLearned = o => o.manual_correction_made || learnedOk.has((o.original_transcript || "").trim().toLowerCase()) || lockedSet.has((o.original_transcript || "").trim().toLowerCase().replace(/\s+/g, " "));
   const isIssue = o => !o.fixed && !isChatter(o) && !isLearned(o) && (o.outcome === "no-match" || o.outcome === "list");
-  function draw(all) {
+  function draw(allIn) {
+    const micStarts = allIn.filter(o => o.outcome === "mic-start" && o.response_time_ms != null).map(o => o.response_time_ms);
+    const all = allIn.filter(o => o.outcome !== "mic-start");
     learnedOk = new Set(all.filter(x => x.manual_correction_made || (x.outcome === "found" && x.learned_mapping_used)).map(x => (x.original_transcript || "").trim().toLowerCase()));
     const g = fieldStats(all), ev = onlyIssues ? all.filter(isIssue) : all, v = g.voiceSearches - 0;
     const tile = (l, val, sub) => `<div class="p-4 bg-card rounded-lg border border-border"><div class="text-sm text-muted-foreground">${l}</div><div class="text-3xl font-bold text-foreground mt-2">${val}</div>${sub ? `<div class="text-xs text-muted-foreground mt-1">${sub}</div>` : ""}</div>`;
@@ -899,7 +901,7 @@ async function tabField(body) {
       <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
         ${tile("Voice searches", g.totalSearches)}${tile("Right first time", pct(g.firstTime, g.totalSearches) + "%", `${g.firstTime} searches`)}
         ${tile("Needed a tap", g.corrected, "postman picked the house")}${tile("No match", g.noMatch, "nothing found")}
-        ${tile("Parcels by voice", g.parcels)}${tile("Avg reply", g.averageResponseTimeMs ? (g.averageResponseTimeMs / 1000).toFixed(1) + "s" : "—")}
+        ${tile("Parcels by voice", g.parcels)}${tile("Mic start (avg)", micStarts.length ? (micStarts.reduce((a, b) => a + b, 0) / micStarts.length / 1000).toFixed(1) + "s" : "—", micStarts.length ? `slowest ${(Math.max(...micStarts) / 1000).toFixed(1)}s · ${micStarts.length} starts` : "time from tap to listening")}
       </div>
       <div class="${card} overflow-x-auto mb-6"><table class="w-full text-sm"><thead><tr class="text-left text-muted-foreground border-b border-border">
         <th class="py-2 pr-3">When</th><th class="py-2 pr-3">Heard</th><th class="py-2 pr-3">App said</th><th class="py-2 pr-3">Result</th><th class="py-2 pr-3">Right house</th><th class="py-2">Fix</th></tr></thead>
