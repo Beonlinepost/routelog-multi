@@ -686,7 +686,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v40";
+const APP_VERSION = "v41";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -709,6 +709,11 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
   const set = s => { st = s; onState(s); };
   const ready = () => { audioOn = true; if (tapAt) { const ms = Date.now() - tapAt; tapAt = 0; try { api.onReady && api.onReady(ms); } catch {} } onState(st); };
 
+  let tokCache = null, tokAt = 0;
+  async function speakToken() {   // a pass is good for 60s; reuse it for speaking
+    if (tokCache && Date.now() - tokAt < 45000) return tokCache;
+    tokCache = await getToken(); tokAt = Date.now(); return tokCache;
+  }
   async function getToken() {
     if (opts.getToken) return opts.getToken();
     const { data, error } = await sb.functions.invoke("dg-token", { body: { relief: opts.token || null } });
@@ -802,6 +807,27 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     get state() { return st; },
     get hearing() { return audioOn && !muted; },
     unlock() { try { unlockAudio(); } catch {} },
+    // Speak through the app's own sound engine (not the iPhone's speech), so the mic keeps running afterwards
+    async say(text) {
+      unlockAudio();
+      const tok = await speakToken();
+      const res = await fetch("https://api.deepgram.com/v1/speak?model=aura-2-draco-en&encoding=linear16&sample_rate=24000&container=none", {
+        method: "POST", headers: { Authorization: "Bearer " + tok, "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+      if (!res.ok || !res.body) throw new Error("speak " + res.status);
+      const reader = res.body.getReader(); let t = Math.max(ctx.currentTime + 0.05, 0), carry = null, lastEnd = t;
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        let bytes = value; if (carry) { const m = new Uint8Array(carry.length + bytes.length); m.set(carry); m.set(bytes, carry.length); bytes = m; carry = null; }
+        if (bytes.length % 2) { carry = bytes.slice(bytes.length - 1); bytes = bytes.slice(0, bytes.length - 1); }
+        const n = bytes.length / 2; if (!n) continue;
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.length), buf = ctx.createBuffer(1, n, 24000), ch = buf.getChannelData(0);
+        for (let i = 0; i < n; i++) ch[i] = dv.getInt16(i * 2, true) / 32768;
+        const srcN = ctx.createBufferSource(); srcN.buffer = buf; srcN.connect(ctx.destination);
+        if (t < ctx.currentTime) t = ctx.currentTime + 0.02;
+        srcN.start(t); t += buf.duration; lastEnd = t;
+      }
+      await new Promise(r => setTimeout(r, Math.max(0, (lastEnd - ctx.currentTime) * 1000) + 120));
+    },
     markTap() { tapAt = Date.now(); },
     async start() {
       if (st !== "idle") return; want = true; muted = false; finals = ""; set("restarting");
@@ -810,7 +836,7 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     },
     stop() { want = false; finals = ""; audioOn = false; set("idle"); },   // line to Deepgram and mic stay warm → next tap is instant
     // open the line to Deepgram before the first tap, so pressing the mic starts listening straight away
-    warm() { standby = true; if (!ws && !connecting) connect(); },
+    warm() { standby = true; if (!ws && !connecting) connect(); speakToken().catch(() => {}); },
     reset() {   // app went to the background: close everything; it warms up again when the app comes back
       want = false; standby = false; clearTimeout(reconnectTimer); clearInterval(keepTimer);
       try { ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: "CloseStream" })); } catch {} try { ws && ws.close(); } catch {} ws = null; closeMic(); audioOn = false; set("idle");
@@ -823,7 +849,7 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     speakingEnd() { setTimeout(() => { muted = false; finals = ""; try { ctx && ctx.state !== "running" && ctx.resume(); } catch {} lastProc = Date.now(); if (want) { set("listening"); if (!ws && !connecting) connect(); } else set("idle"); }, 250); },
     prime(then) {
       // a tiny sound inside the tap lets iPhones speak replies later
-      try { if ("speechSynthesis" in window && /iPad|iPhone|iPod/.test(navigator.userAgent)) { window.speechSynthesis.resume?.(); const u = new SpeechSynthesisUtterance(" "); u.volume = 0; window.speechSynthesis.speak(u); } } catch {}
+      try { unlockAudio(); } catch {}
       then && then();
     },
     destroy() { api.stop(); }
@@ -1459,6 +1485,16 @@ function renderRoute(B) {
   try { voice.warm && voice.warm(); } catch {}
   if (!window.__rlWarmHook) { window.__rlWarmHook = true; document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { try { window.__rlVoice && window.__rlVoice.warm && window.__rlVoice.warm(); } catch {} } }); }
   function speak(text) {
+    if (voice.say) {   // Deepgram engine: speak through the same audio as the mic (iPhone keeps listening)
+      voice.speakingStart();
+      let ended = false; const end = () => { if (!ended) { ended = true; voice.speakingEnd(0); } };
+      const guard = setTimeout(end, 8000);
+      voice.say(String(text || "").replace(/\|/g, ",")).then(() => { clearTimeout(guard); end(); }, e => { console.warn("[Voice] Deepgram speak failed, using phone voice", e); clearTimeout(guard); end(); speakPhone(text, true); });
+      return;
+    }
+    speakPhone(text);
+  }
+  function speakPhone(text, quiet) {
     if (!("speechSynthesis" in window)) return;
     voice.speakingStart();
     const u = new SpeechSynthesisUtterance(sayable(text)); u.rate = 1.12;
@@ -1942,6 +1978,7 @@ function renderRoute(B) {
   };
   const unlock = () => {
     try { voice.unlock && voice.unlock(); } catch {}
+    if (voice.say) { voice.say("Sound on").then(() => toast.success("🔊 Sound is working"), () => toast.error("Sound blocked — check the silent switch and volume")); return; }
     try {
       window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.__rlPrimed = true;
       const u = new SpeechSynthesisUtterance("Sound on"); const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = "en-GB";
