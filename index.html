@@ -686,7 +686,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v38";
+const APP_VERSION = "v39";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -700,6 +700,127 @@ function pickVoice() {
   return _voice;
 }
 if ("speechSynthesis" in window) { try { window.speechSynthesis.getVoices(); window.speechSynthesis.onvoiceschanged = () => { _voice = null; pickVoice(); }; } catch {} }
+/* ===== Deepgram listening (replaces Apple's in-browser speech when available) =====
+   The phone's mic stays open while the mic button is on; audio streams to Deepgram, words come back in ~0.3s.
+   Same controls as createVoice, so the rest of the app doesn't change. */
+function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
+  let st = "idle", want = false, ws = null, stream = null, ctx = null, proc = null, src = null, muted = false;
+  let audioOn = false, tapAt = 0, keepTimer = null, reconnectTimer = null, finals = "", lastInterim = "", connecting = false;
+  const set = s => { st = s; onState(s); };
+  const ready = () => { audioOn = true; if (tapAt) { const ms = Date.now() - tapAt; tapAt = 0; try { api.onReady && api.onReady(ms); } catch {} } onState(st); };
+
+  async function getToken() {
+    if (opts.getToken) return opts.getToken();
+    const { data, error } = await sb.functions.invoke("dg-token", { body: { relief: opts.token || null } });
+    if (error || !data || !data.token) throw new Error((data && data.error && (data.error.err_msg || data.error)) || (error && error.message) || "No speech token");
+    return data.token;
+  }
+  function wsUrl() {
+    const q = new URLSearchParams({ model: "nova-3", language: "en", encoding: "linear16", sample_rate: "16000", channels: "1",
+      interim_results: "true", endpointing: "300", utterance_end_ms: "1000", punctuate: "false", smart_format: "false" });
+    (opts.keyterms ? opts.keyterms() : []).slice(0, 100).forEach(k => q.append("keyterm", k));
+    return "wss://api.deepgram.com/v1/listen?" + q.toString();
+  }
+  async function openMic() {
+    if (stream && stream.getAudioTracks().some(t => t.readyState === "live")) return;
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC();
+    if (ctx.state === "suspended") { try { await ctx.resume(); } catch {} }
+    src = ctx.createMediaStreamSource(stream);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    const ratio = ctx.sampleRate / 16000;
+    proc.onaudioprocess = e => {
+      if (!ws || ws.readyState !== 1 || muted) return;
+      const inp = e.inputBuffer.getChannelData(0), n = Math.floor(inp.length / ratio), out = new Int16Array(n);
+      for (let i = 0; i < n; i++) { const v = inp[Math.floor(i * ratio)]; out[i] = v < 0 ? Math.max(-1, v) * 0x8000 : Math.min(1, v) * 0x7fff; }
+      ws.send(out.buffer);
+    };
+    src.connect(proc); proc.connect(ctx.destination);
+  }
+  function closeMic() {
+    try { proc && (proc.onaudioprocess = null, proc.disconnect()); } catch {}
+    try { src && src.disconnect(); } catch {}
+    try { ctx && ctx.close(); } catch {}
+    try { stream && stream.getTracks().forEach(t => t.stop()); } catch {}
+    proc = src = ctx = stream = null;
+  }
+  async function connect() {
+    if (connecting || !want) return; connecting = true;
+    try {
+      const token = await getToken();
+      if (!want) { connecting = false; return; }
+      const sock = new WebSocket(wsUrl(), ["bearer", token]);
+      ws = sock;
+      sock.onopen = () => { connecting = false; if (ws !== sock) return; set("listening"); ready(); clearInterval(keepTimer); keepTimer = setInterval(() => { try { sock.readyState === 1 && sock.send(JSON.stringify({ type: "KeepAlive" })); } catch {} }, 8000); };
+      sock.onmessage = ev => {
+        if (ws !== sock || muted) return;
+        let m; try { m = JSON.parse(ev.data); } catch { return; }
+        if (m.type === "Results") {
+          const t = ((m.channel && m.channel.alternatives && m.channel.alternatives[0] && m.channel.alternatives[0].transcript) || "").trim();
+          if (m.is_final) { if (t) finals = (finals + " " + t).trim(); }
+          else if (t) { lastInterim = (finals + " " + t).trim(); onTranscript(lastInterim, false); }
+          if (m.speech_final && finals) { const out = finals; finals = ""; lastInterim = ""; onTranscript(out, true); }
+        } else if (m.type === "UtteranceEnd") {
+          if (finals) { const out = finals; finals = ""; lastInterim = ""; onTranscript(out, true); }
+        }
+      };
+      sock.onerror = () => {};
+      sock.onclose = () => {
+        clearInterval(keepTimer);
+        if (ws === sock) ws = null;
+        connecting = false; audioOn = false; onState(st);
+        if (want) { clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connect, 300); }   // reconnect straight away
+      };
+    } catch (e) {
+      connecting = false;
+      if (opts.onFail) opts.onFail(e); else onError(String(e.message || e));
+    }
+  }
+  const api = {
+    engine: "deepgram",
+    get state() { return st; },
+    get hearing() { return audioOn && !muted; },
+    markTap() { tapAt = Date.now(); },
+    async start() {
+      if (st !== "idle") return; want = true; muted = false; finals = ""; set("restarting");
+      try { await openMic(); } catch (e) { want = false; set("idle"); return onError("Microphone blocked — allow the microphone for this site"); }
+      connect();
+    },
+    stop() { want = false; clearTimeout(reconnectTimer); clearInterval(keepTimer); try { ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: "CloseStream" })); } catch {} try { ws && ws.close(); } catch {} ws = null; closeMic(); audioOn = false; set("idle"); },
+    reset() { api.stop(); },
+    fresh() { try { ws && ws.close(); } catch {} },
+    toggle() { st === "idle" ? api.start() : api.stop(); },
+    // while the app speaks, keep the mic open but ignore what it hears (so it doesn't hear itself)
+    speakingStart() { muted = true; finals = ""; set("speaking"); },
+    whenMicOff() { return Promise.resolve(); },
+    speakingEnd() { setTimeout(() => { muted = false; finals = ""; if (want) { set("listening"); if (!ws && !connecting) connect(); } else set("idle"); }, 250); },
+    prime(then) {
+      // a tiny sound inside the tap lets iPhones speak replies later
+      try { if ("speechSynthesis" in window && /iPad|iPhone|iPod/.test(navigator.userAgent)) { window.speechSynthesis.resume?.(); const u = new SpeechSynthesisUtterance(" "); u.volume = 0; window.speechSynthesis.speak(u); } } catch {}
+      then && then();
+    },
+    destroy() { api.stop(); }
+  };
+  return api;
+}
+
+/* Names to teach the speech service for this route: Irish names and the route's surnames (max 100) */
+function routeKeyterms(stops) {
+  const irish = /bh|mh|dh|ao|aoi|idh|ái|é|í|ó|ú|^ni$|^nic$|^ui$/i, firsts = new Map(), surs = new Map();
+  (stops || []).forEach(s => splitPipe(s.residents).forEach(n => {
+    const w = n.replace(/[()]/g, "").split(/\s+/).filter(Boolean); if (w.length < 2) return;
+    firsts.set(w[0], (firsts.get(w[0]) || 0) + 1);
+    const sn = w.slice(1).join(" "); surs.set(sn, (surs.get(sn) || 0) + 1);
+  }));
+  const known = new Set(Object.keys(typeof IRISH_SOUNDS !== "undefined" ? IRISH_SOUNDS : {}));
+  const irishFirst = [...firsts.keys()].filter(f => irish.test(f) || known.has(f.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")));
+  const topSurnames = [...surs.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]).filter(x => x.length < 30 && !/house|vacant|rip/i.test(x))
+    .map(x => x.replace(/^O([a-z])(?=[a-z]{3})/, (m, c) => "O'" + c.toUpperCase()));
+  const out = []; const seen = new Set();
+  [...irishFirst, ...topSurnames].forEach(t => { const k = t.toLowerCase(); if (!seen.has(k) && out.length < 100) { seen.add(k); out.push(t); } });
+  return out;
+}
 function createVoice(onTranscript, onError, onState, lang = "en-GB") {
   let rec = null, want = false, st = "idle", timer = null, retries = 0, micOn = false, idleWaiters = [], audioOn = false, tapAt = 0;
   const micOff = () => { micOn = false; audioOn = false; const w = idleWaiters; idleWaiters = []; w.forEach(f => f()); };
@@ -1289,7 +1410,20 @@ function renderRoute(B) {
   let sortable = null;
 
   /* ---- speech out ---- */
-  const voice = createVoice((t, fin) => onTranscript(t, fin), e => { if (/not-allowed/.test(String(e)) && !S.micDirect) { S.micDirect = true; S.voiceErr = "Tap the mic again"; try { voice.stop(); } catch {} } else S.voiceErr = e; drawHeader(); }, () => drawMic());
+  const vErr = e => { if (/not-allowed/.test(String(e)) && !S.micDirect) { S.micDirect = true; S.voiceErr = "Tap the mic again"; try { voice.stop(); } catch {} } else S.voiceErr = e; drawHeader(); };
+  const vArgs = [(t, fin) => onTranscript(t, fin), vErr, () => drawMic()];
+  // Deepgram first (fast, knows the route's names); if it can't connect, fall back to Apple's speech automatically
+  try { const e = new URLSearchParams(location.search).get("engine"); if (e === "apple" || e === "deepgram") lsSet("rl-engine", e); } catch {}
+  let engine = lsGet("rl-engine") === "apple" ? createVoice(...vArgs) : createDeepgramVoice(...vArgs, {
+    token, keyterms: () => routeKeyterms(all),
+    onFail: e => {
+      console.warn("[Deepgram] falling back to Apple speech:", e);
+      const ready = engine.onReady; try { engine.stop(); } catch {}
+      engine = createVoice(...vArgs); engine.onReady = ready; window.__rlVoice = engine;
+      toast.error("Fast listening unavailable — using backup"); engine.markTap(); engine.start();
+    }
+  });
+  const voice = new Proxy({}, { get: (_, k) => engine[k], set: (_, k, v) => { engine[k] = v; return true; } });
   voice.onReady = ms => { S.searchStart = Date.now() - ms; logSearch("(mic switched on)", "mic-start", `Mic ready in ${(ms / 1000).toFixed(1)}s`, null, []); drawMic(); };
   if (!window.__rlVisHook) { window.__rlVisHook = true;
     const away = () => { try { window.__rlVoice && window.__rlVoice.reset(); window.speechSynthesis?.cancel(); } catch {} };
@@ -1597,7 +1731,7 @@ function renderRoute(B) {
   }
   function drawHeader() {
     const sec = curSection();
-    $("[data-sub]").textContent = (share ? "Relief view · " : "") + (sec ? `Box ${sec.boxNumber} · ${sec.name}` : "No sections yet") + " · " + APP_VERSION;
+    $("[data-sub]").textContent = (share ? "Relief view · " : "") + (sec ? `Box ${sec.boxNumber} · ${sec.name}` : "No sections yet") + " · " + APP_VERSION + (() => { try { return voice.engine === "deepgram" ? " ⚡" : ""; } catch { return ""; } })();
     drawTabs();
     $$("[data-mode]").forEach(b => {
       b.className = `flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all ${S.mode === b.dataset.mode ? "bg-accent text-accent-foreground shadow" : "bg-white/10 text-primary-foreground hover:bg-white/20"}`;
