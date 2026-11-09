@@ -686,7 +686,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v36";
+const APP_VERSION = "v37";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -720,7 +720,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       clearTimeout(silenceTimer);
       if (!gotFinal && lastInterim.trim()) { vlog("Using last heard words as final (" + why + ")", lastInterim); gotFinal = true; const t = lastInterim; lastInterim = ""; onTranscript(t, true); }
     };
-    rec.onstart = () => { micOn = true; vlog("Recognition started"); retries = 0; lastInterim = ""; gotFinal = false; set("listening"); if (!("onaudiostart" in rec)) ready(); };
+    rec.onstart = () => { armDeaf(); micOn = true; vlog("Recognition started"); retries = 0; lastInterim = ""; gotFinal = false; set("listening"); if (!("onaudiostart" in rec)) ready(); };
     // the phone is really hearing you only from here — the mic turns red and says "Talk"
     rec.onaudiostart = () => { audioOn = true; ready(); onState(st); armDeaf(); };
     rec.onaudioend = () => { audioOn = false; onState(st); };
@@ -735,7 +735,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
       else if (fin) { clearTimeout(silenceTimer); gotFinal = true; lastInterim = ""; vlog("Final transcript", fin); onTranscript(fin, true); }
     };
     rec.onend = () => {
-      clearTimeout(deafTimer);
+      if (!want) clearTimeout(deafTimer);
       micOff();
       finishInterim("end");
       clear();
@@ -760,6 +760,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     start() {
       if (st !== "idle") return; ensure(); if (!rec) return; want = true; retries = 0; clear();
       try { rec.start(); } catch (x) { vlog("Start error", x); }
+      armDeaf();
       // watchdog: if the iPhone hasn't really started within 1.5s, throw the old mic away and start a fresh one
       let kicks = 0;
       const dog = () => { if (!want || micOn) return; if (++kicks > 4) return; vlog("Mic slow to start — fresh restart", kicks); api.fresh(); setTimeout(dog, 1500); };
@@ -768,7 +769,7 @@ function createVoice(onTranscript, onError, onState, lang = "en-IE") {
     fresh() {   // brand-new recogniser (the old one can get stuck after the app was in the background)
       const old = rec; rec = null; micOn = false; audioOn = false;
       if (old) { try { old.onend = old.onerror = old.onresult = old.onstart = old.onaudiostart = old.onaudioend = null; old.abort(); } catch {} }
-      ensure(); if (rec && want) { set("listening"); try { rec.start(); } catch (x) { vlog("Fresh start error", x); } }
+      ensure(); if (rec && want) { set("listening"); try { rec.start(); } catch (x) { vlog("Fresh start error", x); } armDeaf(); }
     },
     reset() {   // app went to the background: drop the mic completely so it starts clean next time
       want = false; clear(); clearTimeout(deafTimer);
