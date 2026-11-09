@@ -686,7 +686,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v39";
+const APP_VERSION = "v40";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -705,7 +705,7 @@ if ("speechSynthesis" in window) { try { window.speechSynthesis.getVoices(); win
    Same controls as createVoice, so the rest of the app doesn't change. */
 function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
   let st = "idle", want = false, ws = null, stream = null, ctx = null, proc = null, src = null, muted = false;
-  let audioOn = false, tapAt = 0, keepTimer = null, reconnectTimer = null, finals = "", lastInterim = "", connecting = false;
+  let audioOn = false, tapAt = 0, keepTimer = null, reconnectTimer = null, finals = "", lastInterim = "", connecting = false, standby = false;
   const set = s => { st = s; onState(s); };
   const ready = () => { audioOn = true; if (tapAt) { const ms = Date.now() - tapAt; tapAt = 0; try { api.onReady && api.onReady(ms); } catch {} } onState(st); };
 
@@ -721,40 +721,60 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     (opts.keyterms ? opts.keyterms() : []).slice(0, 100).forEach(k => q.append("keyterm", k));
     return "wss://api.deepgram.com/v1/listen?" + q.toString();
   }
-  async function openMic() {
-    if (stream && stream.getAudioTracks().some(t => t.readyState === "live")) return;
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+  // iPhone only lets sound processing run if it is switched on inside the tap itself — so do that first, before any waiting
+  function unlockAudio() {
     const AC = window.AudioContext || window.webkitAudioContext;
-    ctx = new AC();
-    if (ctx.state === "suspended") { try { await ctx.resume(); } catch {} }
+    if (!ctx || ctx.state === "closed") ctx = new AC();
+    if (ctx.state !== "running") { try { ctx.resume(); } catch {} }
+  }
+  let lastProc = 0, dogTimer = null;
+  async function openMic() {
+    unlockAudio();
+    const live = stream && stream.getAudioTracks().some(t => t.readyState === "live" && !t.muted);
+    if (live && proc) return;
+    try { proc && (proc.onaudioprocess = null, proc.disconnect()); src && src.disconnect(); } catch {}
+    try { stream && stream.getTracks().forEach(t => t.stop()); } catch {}
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    if (ctx.state !== "running") { try { await ctx.resume(); } catch {} }
     src = ctx.createMediaStreamSource(stream);
     proc = ctx.createScriptProcessor(4096, 1, 1);
     const ratio = ctx.sampleRate / 16000;
     proc.onaudioprocess = e => {
-      if (!ws || ws.readyState !== 1 || muted) return;
+      lastProc = Date.now();
+      if (!want || !ws || ws.readyState !== 1 || muted) return;
       const inp = e.inputBuffer.getChannelData(0), n = Math.floor(inp.length / ratio), out = new Int16Array(n);
       for (let i = 0; i < n; i++) { const v = inp[Math.floor(i * ratio)]; out[i] = v < 0 ? Math.max(-1, v) * 0x8000 : Math.min(1, v) * 0x7fff; }
       ws.send(out.buffer);
     };
     src.connect(proc); proc.connect(ctx.destination);
+    lastProc = Date.now();
+    // watchdog: if the phone stops feeding sound (e.g. after the app speaks), wake it or reopen the mic within ~1.5s
+    clearInterval(dogTimer);
+    dogTimer = setInterval(() => {
+      if (!want || muted) return;
+      if (ctx && ctx.state !== "running") { try { ctx.resume(); } catch {} }
+      const dead = !stream || !stream.getAudioTracks().some(t => t.readyState === "live");
+      if (dead || Date.now() - lastProc > 1500) { vlog("Mic went quiet — reopening"); lastProc = Date.now(); openMic().catch(() => {}); }
+    }, 750);
   }
   function closeMic() {
     try { proc && (proc.onaudioprocess = null, proc.disconnect()); } catch {}
     try { src && src.disconnect(); } catch {}
     try { ctx && ctx.close(); } catch {}
     try { stream && stream.getTracks().forEach(t => t.stop()); } catch {}
+    clearInterval(dogTimer);
     proc = src = ctx = stream = null;
   }
   async function connect() {
-    if (connecting || !want) return; connecting = true;
+    if (connecting || !(want || standby) || (ws && ws.readyState <= 1)) return; connecting = true;
     try {
       const token = await getToken();
-      if (!want) { connecting = false; return; }
+      if (!(want || standby)) { connecting = false; return; }
       const sock = new WebSocket(wsUrl(), ["bearer", token]);
       ws = sock;
-      sock.onopen = () => { connecting = false; if (ws !== sock) return; set("listening"); ready(); clearInterval(keepTimer); keepTimer = setInterval(() => { try { sock.readyState === 1 && sock.send(JSON.stringify({ type: "KeepAlive" })); } catch {} }, 8000); };
+      sock.onopen = () => { connecting = false; if (ws !== sock) return; if (want) { set("listening"); ready(); } clearInterval(keepTimer); keepTimer = setInterval(() => { try { sock.readyState === 1 && sock.send(JSON.stringify({ type: "KeepAlive" })); } catch {} }, 8000); };
       sock.onmessage = ev => {
-        if (ws !== sock || muted) return;
+        if (ws !== sock || muted || !want) return;
         let m; try { m = JSON.parse(ev.data); } catch { return; }
         if (m.type === "Results") {
           const t = ((m.channel && m.channel.alternatives && m.channel.alternatives[0] && m.channel.alternatives[0].transcript) || "").trim();
@@ -770,7 +790,7 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
         clearInterval(keepTimer);
         if (ws === sock) ws = null;
         connecting = false; audioOn = false; onState(st);
-        if (want) { clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connect, 300); }   // reconnect straight away
+        if (want || standby) { clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connect, want ? 300 : 2000); }   // reconnect straight away
       };
     } catch (e) {
       connecting = false;
@@ -781,20 +801,26 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     engine: "deepgram",
     get state() { return st; },
     get hearing() { return audioOn && !muted; },
+    unlock() { try { unlockAudio(); } catch {} },
     markTap() { tapAt = Date.now(); },
     async start() {
       if (st !== "idle") return; want = true; muted = false; finals = ""; set("restarting");
       try { await openMic(); } catch (e) { want = false; set("idle"); return onError("Microphone blocked — allow the microphone for this site"); }
-      connect();
+      if (ws && ws.readyState === 1) { set("listening"); ready(); } else connect();
     },
-    stop() { want = false; clearTimeout(reconnectTimer); clearInterval(keepTimer); try { ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: "CloseStream" })); } catch {} try { ws && ws.close(); } catch {} ws = null; closeMic(); audioOn = false; set("idle"); },
-    reset() { api.stop(); },
+    stop() { want = false; finals = ""; audioOn = false; set("idle"); },   // line to Deepgram and mic stay warm → next tap is instant
+    // open the line to Deepgram before the first tap, so pressing the mic starts listening straight away
+    warm() { standby = true; if (!ws && !connecting) connect(); },
+    reset() {   // app went to the background: close everything; it warms up again when the app comes back
+      want = false; standby = false; clearTimeout(reconnectTimer); clearInterval(keepTimer);
+      try { ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: "CloseStream" })); } catch {} try { ws && ws.close(); } catch {} ws = null; closeMic(); audioOn = false; set("idle");
+    },
     fresh() { try { ws && ws.close(); } catch {} },
     toggle() { st === "idle" ? api.start() : api.stop(); },
     // while the app speaks, keep the mic open but ignore what it hears (so it doesn't hear itself)
     speakingStart() { muted = true; finals = ""; set("speaking"); },
     whenMicOff() { return Promise.resolve(); },
-    speakingEnd() { setTimeout(() => { muted = false; finals = ""; if (want) { set("listening"); if (!ws && !connecting) connect(); } else set("idle"); }, 250); },
+    speakingEnd() { setTimeout(() => { muted = false; finals = ""; try { ctx && ctx.state !== "running" && ctx.resume(); } catch {} lastProc = Date.now(); if (want) { set("listening"); if (!ws && !connecting) connect(); } else set("idle"); }, 250); },
     prime(then) {
       // a tiny sound inside the tap lets iPhones speak replies later
       try { if ("speechSynthesis" in window && /iPad|iPhone|iPod/.test(navigator.userAgent)) { window.speechSynthesis.resume?.(); const u = new SpeechSynthesisUtterance(" "); u.volume = 0; window.speechSynthesis.speak(u); } } catch {}
@@ -1430,6 +1456,8 @@ function renderRoute(B) {
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") away(); });
     window.addEventListener("pagehide", away); }
   window.__rlVoice = voice;
+  try { voice.warm && voice.warm(); } catch {}
+  if (!window.__rlWarmHook) { window.__rlWarmHook = true; document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { try { window.__rlVoice && window.__rlVoice.warm && window.__rlVoice.warm(); } catch {} } }); }
   function speak(text) {
     if (!("speechSynthesis" in window)) return;
     voice.speakingStart();
@@ -1905,6 +1933,7 @@ function renderRoute(B) {
   qEl.oninput = () => { S.query = qEl.value; S.riPick = null; S.parcelList = false; drawList(); riVisual(); };
   $("[data-clear]").onclick = () => { S.query = ""; qEl.value = ""; S.riPick = null; window.speechSynthesis?.cancel(); drawList(); };
   $("[data-mic]").onpointerdown = () => {
+    try { voice.unlock && voice.unlock(); } catch {}
     if (voice.state === "idle") voice.markTap();
     if (voice.state !== "idle") { voice.toggle(); S.query = ""; qEl.value = ""; window.speechSynthesis?.cancel(); drawList(); return; }
     S.voiceErr = null; drawHeader();
@@ -1912,6 +1941,7 @@ function renderRoute(B) {
     else voice.prime(() => voice.toggle());
   };
   const unlock = () => {
+    try { voice.unlock && voice.unlock(); } catch {}
     try {
       window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.__rlPrimed = true;
       const u = new SpeechSynthesisUtterance("Sound on"); const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = "en-GB";
