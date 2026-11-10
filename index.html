@@ -686,7 +686,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v42";
+const APP_VERSION = "v43";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -706,6 +706,15 @@ if ("speechSynthesis" in window) { try { window.speechSynthesis.getVoices(); win
 function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
   let st = "idle", want = false, ws = null, stream = null, ctx = null, proc = null, src = null, muted = false;
   let audioOn = false, tapAt = 0, keepTimer = null, reconnectTimer = null, finals = "", lastInterim = "", connecting = false, standby = false;
+  // v43: keep listening while the app replies, so the next name can be called straight away
+  let speaking = false, spokenSet = null, echoUntil = 0, hushed = false, playing = [], hushResolve = null;
+  const ttsCache = new Map();
+  const NUMW = ["zero","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve","thirteen","fourteen","fifteen","sixteen","seventeen","eighteen","nineteen"], TENW = ["","","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"];
+  const numWords = n => n < 20 ? [NUMW[n]] : [TENW[Math.floor(n / 10) % 10], ...(n % 10 ? [NUMW[n % 10]] : [])];
+  const wordsOf = t => String(t || "").toLowerCase().replace(/[^a-z0-9'\s]/g, " ").split(/\s+/).filter(Boolean);
+  function echoSet(text) { const set = new Set(["box", "a", "the", "it", "is"]); wordsOf(text.replace(/\bMc ?/g, "Mc")).forEach(w => { set.add(w); set.add(w.replace(/'s$/, "")); if (/^\d+$/.test(w) && +w < 100) numWords(+w).forEach(x => set.add(x)); }); return set; }
+  const isEcho = t => { const w = wordsOf(t); return !!w.length && !!spokenSet && w.every(x => spokenSet.has(x)); };
+  function hush() { hushed = true; speaking = false; playing.forEach(x => { try { x.stop(); } catch {} }); playing = []; if (hushResolve) { const r = hushResolve; hushResolve = null; r(); } }
   const set = s => { st = s; onState(s); };
   const ready = () => { audioOn = true; if (tapAt) { const ms = Date.now() - tapAt; tapAt = 0; try { api.onReady && api.onReady(ms); } catch {} } onState(st); };
 
@@ -783,6 +792,8 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
         let m; try { m = JSON.parse(ev.data); } catch { return; }
         if (m.type === "Results") {
           const t = ((m.channel && m.channel.alternatives && m.channel.alternatives[0] && m.channel.alternatives[0].transcript) || "").trim();
+          if (t && (speaking || Date.now() < echoUntil) && isEcho(t)) return;   // the phone hearing its own reply — ignore
+          if (t && speaking) hush();                                             // a new name while it's replying: cut the reply short
           if (m.is_final) { if (t) finals = (finals + " " + t).trim(); }
           else if (t) { lastInterim = (finals + " " + t).trim(); onTranscript(lastInterim, false); }
           if (m.speech_final && finals) { const out = finals; finals = ""; lastInterim = ""; onTranscript(out, true); }
@@ -809,25 +820,36 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     unlock() { try { unlockAudio(); } catch {} },
     // Speak through the app's own sound engine (not the iPhone's speech), so the mic keeps running afterwards
     async say(text) {
-      unlockAudio();
-      const tok = await speakToken();
-      const res = await fetch("https://api.deepgram.com/v1/speak?model=aura-2-draco-en&encoding=linear16&sample_rate=24000&container=none", {
-        method: "POST", headers: { Authorization: "Bearer " + tok, "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
-      if (!res.ok || !res.body) throw new Error("speak " + res.status);
-      const reader = res.body.getReader(); let t = null, carry = null, lastEnd = 0;   // start ~0.35s after the first sound arrives, so a weak signal doesn't make it stutter
-      for (;;) {
-        const { value, done } = await reader.read(); if (done) break;
-        let bytes = value; if (carry) { const m = new Uint8Array(carry.length + bytes.length); m.set(carry); m.set(bytes, carry.length); bytes = m; carry = null; }
-        if (bytes.length % 2) { carry = bytes.slice(bytes.length - 1); bytes = bytes.slice(0, bytes.length - 1); }
-        const n = bytes.length / 2; if (!n) continue;
-        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.length), buf = ctx.createBuffer(1, n, 24000), ch = buf.getChannelData(0);
-        for (let i = 0; i < n; i++) ch[i] = dv.getInt16(i * 2, true) / 32768;
-        const srcN = ctx.createBufferSource(); srcN.buffer = buf; srcN.connect(ctx.destination);
-        if (t === null) t = ctx.currentTime + 0.35;
-        if (t < ctx.currentTime) t = ctx.currentTime + 0.12;
-        srcN.start(t); t += buf.duration; lastEnd = t;
+      unlockAudio(); hushed = false;
+      const play = (bufs, lead) => { let t = ctx.currentTime + lead; for (const b of bufs) { const x = ctx.createBufferSource(); x.buffer = b; x.connect(ctx.destination); x.start(t); t += b.duration; playing.push(x); } return t; };
+      let lastEnd = 0;
+      const hit = ttsCache.get(text);
+      if (hit) lastEnd = play(hit, 0.02);   // said this before: play instantly, no internet wait
+      else {
+        const tok = await speakToken(); if (hushed) return;
+        const res = await fetch("https://api.deepgram.com/v1/speak?model=aura-2-draco-en&encoding=linear16&sample_rate=24000&container=none", {
+          method: "POST", headers: { Authorization: "Bearer " + tok, "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+        if (!res.ok || !res.body) throw new Error("speak " + res.status);
+        const reader = res.body.getReader(); let t = null, carry = null; const bufs = [];
+        for (;;) {
+          const { value, done } = await reader.read(); if (done) break;
+          if (hushed) { try { reader.cancel(); } catch {} break; }
+          let bytes = value; if (carry) { const m = new Uint8Array(carry.length + bytes.length); m.set(carry); m.set(bytes, carry.length); bytes = m; carry = null; }
+          if (bytes.length % 2) { carry = bytes.slice(bytes.length - 1); bytes = bytes.slice(0, bytes.length - 1); }
+          const n = bytes.length / 2; if (!n) continue;
+          const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.length), buf = ctx.createBuffer(1, n, 24000), ch = buf.getChannelData(0);
+          for (let i = 0; i < n; i++) ch[i] = dv.getInt16(i * 2, true) / 32768;
+          bufs.push(buf);
+          const x = ctx.createBufferSource(); x.buffer = buf; x.connect(ctx.destination);
+          if (t === null) t = ctx.currentTime + 0.18;   // small cushion so a weak signal doesn't stutter
+          if (t < ctx.currentTime) t = ctx.currentTime + 0.08;
+          x.start(t); t += buf.duration; lastEnd = t; playing.push(x);
+        }
+        if (!hushed && bufs.length) { ttsCache.set(text, bufs); if (ttsCache.size > 200) ttsCache.delete(ttsCache.keys().next().value); }
       }
-      await new Promise(r => setTimeout(r, Math.max(0, ((lastEnd || ctx.currentTime) - ctx.currentTime) * 1000) + 120));
+      if (hushed) return;
+      await new Promise(r => { hushResolve = r; setTimeout(r, Math.max(0, ((lastEnd || ctx.currentTime) - ctx.currentTime) * 1000) + 30); });
+      hushResolve = null; playing = [];
     },
     markTap() { tapAt = Date.now(); },
     async start() {
@@ -845,9 +867,10 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     fresh() { try { ws && ws.close(); } catch {} },
     toggle() { st === "idle" ? api.start() : api.stop(); },
     // while the app speaks, keep the mic open but ignore what it hears (so it doesn't hear itself)
-    speakingStart() { muted = true; finals = ""; set("speaking"); },
+    // with text: keep listening (ignore its own echo, let a new name cut in). Without text (phone voice backup): mute as before
+    speakingStart(text) { if (text) { speaking = true; spokenSet = echoSet(String(text)); } else { muted = true; finals = ""; } set("speaking"); },
     whenMicOff() { return Promise.resolve(); },
-    speakingEnd() { setTimeout(() => { muted = false; finals = ""; try { ctx && ctx.state !== "running" && ctx.resume(); } catch {} lastProc = Date.now(); if (want) { set("listening"); if (!ws && !connecting) connect(); } else set("idle"); }, 250); },
+    speakingEnd() { const hard = muted; speaking = false; echoUntil = Date.now() + 1200; setTimeout(() => { if (hard) { muted = false; finals = ""; } try { ctx && ctx.state !== "running" && ctx.resume(); } catch {} lastProc = Date.now(); if (want) { set("listening"); if (!ws && !connecting) connect(); } else set("idle"); }, hard ? 250 : 0); },
     prime(then) {
       // a tiny sound inside the tap lets iPhones speak replies later
       try { unlockAudio(); } catch {}
@@ -1477,7 +1500,8 @@ function renderRoute(B) {
     }
   });
   const voice = new Proxy({}, { get: (_, k) => engine[k], set: (_, k, v) => { engine[k] = v; return true; } });
-  voice.onReady = ms => { S.searchStart = Date.now() - ms; logSearch("(mic switched on)", "mic-start", `Mic ready in ${(ms / 1000).toFixed(1)}s`, null, []); drawMic(); };
+  voice.onReady = ms => { S.searchStart = Date.now() - ms; const ua = navigator.userAgent, dev = /iPhone/.test(ua) ? "iPhone" + ((ua.match(/OS (\d+)_/) || [])[1] ? " iOS " + ua.match(/OS (\d+)_/)[1] : "") : /Android/.test(ua) ? "Android" : "Computer";
+    logSearch("(mic switched on)", "mic-start", `Mic ready in ${(ms / 1000).toFixed(1)}s · ${dev} · ${voice.engine || "apple"} · ${APP_VERSION}`, null, []); drawMic(); };
   if (!window.__rlVisHook) { window.__rlVisHook = true;
     const away = () => { try { window.__rlVoice && window.__rlVoice.reset(); window.speechSynthesis?.cancel(); } catch {} };
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") away(); });
@@ -1487,7 +1511,7 @@ function renderRoute(B) {
   if (!window.__rlWarmHook) { window.__rlWarmHook = true; document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { try { window.__rlVoice && window.__rlVoice.warm && window.__rlVoice.warm(); } catch {} } }); }
   function speak(text) {
     if (voice.say) {   // Deepgram engine: speak through the same audio as the mic (iPhone keeps listening)
-      voice.speakingStart();
+      voice.speakingStart(String(text || ""));
       let ended = false; const end = () => { if (!ended) { ended = true; voice.speakingEnd(0); } };
       const guard = setTimeout(end, 8000);
       voice.say(String(text || "").replace(/\|/g, ",")).then(() => { clearTimeout(guard); end(); }, e => { console.warn("[Voice] Deepgram speak failed, using phone voice", e); clearTimeout(guard); end(); speakPhone(text, true); });
@@ -1510,9 +1534,16 @@ function renderRoute(B) {
     const go = () => { guard = setTimeout(() => { console.warn("[Voice] utterance.onend never fired — forcing mic restart"); fin(); }, 400 + wd * 2); try { window.speechSynthesis.cancel(); window.speechSynthesis.resume?.(); window.speechSynthesis.speak(u); } catch (e) { console.warn("[Voice] speak failed", e); fin(); } };
     (voice.whenMicOff ? voice.whenMicOff(700) : Promise.resolve()).then(() => setTimeout(go, ios ? 300 : 40));
   }
-  function callout(stop, name) {
+  // v43 sorting reply is short: first name + box number ("Michael, 23"). full=true keeps the whole name (used for "Is it …?")
+  function callout(stop, name, full) {
     const p = [];
-    if (S.mode === "sorting") { if (name) p.push(name); if (stop.road) p.push(stop.road); }
+    if (S.mode === "sorting") {
+      let who = String(name || "").trim();
+      if (!full && who && !(stop.businessName && who === stop.businessName)) { const w = who.split(/\s+/); if (w.length > 1) who = /^(mr|mrs|ms|miss|dr|fr)\.?$/i.test(w[0]) ? w.slice(0, 2).join(" ") : w[0]; }
+      const box = window.__boxOf?.get(stop.sectionId);
+      if (who) p.push(who); if (box != null) p.push(String(box)); else if (stop.road) p.push(stop.road);
+      return p.join(", ");
+    }
     else if (S.mode === "delivery") p.push(`Stop ${stop.stopOrder}`);
     else { if (name) p.push(name); p.push(`Stop ${stop.stopOrder}`); }
     return p.join(". ");
@@ -1626,6 +1657,7 @@ function renderRoute(B) {
       }
       return;
     }
+    if (/^(hello|hiya|hi|hey|ok|okay|yeah|yes|no|test|testing|right|grand|sorry)$/i.test(t) || /^call (out|it|back)\b/i.test(t)) { S.query = ""; qEl.value = ""; drawList(); logSearch(t, "chatter", "", null, []); return; }   // plain talk, not a name
     const r = await resolve(t);
     S.lastCtx = ctx(t, r.level, r.results);
     const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
@@ -1637,7 +1669,7 @@ function renderRoute(B) {
     if (r.guess) {
       S.voiceList = r.results; S.voiceListQ = t; S.lastCtx = { ...S.lastCtx, timestamp: Date.now() + 10000 };   // 20s to tap
       drawList();
-      const w = t.split(/\s+/); return say(r.results.length === 1 ? `Is it ${callout(r.results[0], nameFor(r.results[0], t))}? Tap to confirm` : `Which ${w[w.length - 1]}? Tap the house`, t, "list", null, r.results);
+      const w = t.split(/\s+/); return say(r.results.length === 1 ? `Is it ${callout(r.results[0], nameFor(r.results[0], t), true)}? Tap to confirm` : `Which ${w[w.length - 1]}? Tap the house`, t, "list", null, r.results);
     }
     if (r.level === 1 || r.level === 2) {
       if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
