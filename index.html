@@ -718,7 +718,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v44";
+const APP_VERSION = "v45";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -1725,9 +1725,10 @@ function renderRoute(B) {
       say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: all, onSave: saveName }); return;
     }
     if (r.guess) {
+      const kin = surnameKin(pool(), t, r.results); if (kin.length) r.results = [...r.results, ...kin];
       S.voiceList = r.results; S.voiceListQ = t; S.lastCtx = { ...S.lastCtx, timestamp: Date.now() + 10000 };   // 20s to tap
       drawList();
-      const w = t.split(/\s+/); return say(r.results.length === 1 ? `Is it ${callout(r.results[0], nameFor(r.results[0], t), true)}? Tap to confirm` : `Which ${w[w.length - 1]}? Tap the house`, t, "list", null, r.results);
+      const w = t.split(/\s+/); return say(r.results.length === 1 ? `Is it ${callout(r.results[0], nameFor(r.results[0], t), true)}? Tap to confirm` : `Which ${w[w.length - 1]}? ${r.results.length} houses. Tap the house`, t, "list", null, r.results);
     }
     if (r.level === 1 || r.level === 2) {
       if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
@@ -1908,6 +1909,21 @@ function renderRoute(B) {
     $("[data-plist]").style.display = total ? "" : "none";
     drawMic();
   }
+  /* every house with the surname that was said ("James Harley" → all 7 Harley houses), so the right one is always there to tap */
+  const snKey = w => String(w || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z]/g, "").replace(/^mac(?=[a-z]{3})/, "mc");
+  function spokenSurname(q) {
+    const w = String(q || "").trim().split(/\s+/).filter(Boolean); if (!w.length) return "";
+    let last = w[w.length - 1];
+    if (w.length >= 2 && /^(mc|mac|o|o'|ni|nic|ui|mhic|de)$/i.test(w[w.length - 2])) last = w[w.length - 2] + last;
+    return snKey(last);
+  }
+  function surnameKin(P, q, have) {
+    const k = spokenSurname(q); if (!k || k.length < 3) return [];
+    const ids = new Set((have || []).map(x => x.id)), first = snKey(String(q).trim().split(/\s+/)[0]);
+    const hit = P.filter(st => !ids.has(st.id) && splitPipe(st.residents).some(r => { const w = r.trim().split(/\s+/); return w.length > 1 && snKey(w[w.length - 1]) === k || (w.length > 2 && snKey(w[w.length - 2] + w[w.length - 1]) === k); }));
+    const close = st => Math.max(0, ...splitPipe(st.residents).map(r => { const f = snKey(r.split(/\s+/)[0]); return f[0] === first[0] ? 1 + (f.slice(0, 2) === first.slice(0, 2) ? 1 : 0) : 0; }));
+    return hit.sort((a, b) => close(b) - close(a));
+  }
   function listToShow() {
     if (S.parcelList) {
       const ids = new Set(onlyParcels().map(p => p.stopId)), pos = id => sections.findIndex(x => x.id === id);
@@ -1916,7 +1932,8 @@ function renderRoute(B) {
     const base = sectionStops(), q = S.query.trim();
     if (S.reorder || !q) return base;
     if (S.voiceList && S.voiceListQ === S.query) return S.voiceList;
-    const P = pool(), r = exactFirst(searchStops(P, q).results, S.query);
+    const P = pool(), r0 = exactFirst(searchStops(P, q).results, S.query);
+    const r = /\s/.test(q) ? [...r0, ...surnameKin(P, q, r0)] : r0;
     return S.riPick && !r.some(x => x.id === S.riPick.id) ? [S.riPick, ...r] : r;
   }
   const addBtn = (label, after) => `<button data-insert="${after}" class="w-full flex items-center justify-center gap-1.5 py-1 my-0.5 rounded-lg border border-dashed border-primary/25 text-primary/60 text-xs font-semibold hover:border-primary/60 hover:text-primary hover:bg-primary/5 transition-all disabled:opacity-40">${icon("plus", 12)}${label}</button>`;
