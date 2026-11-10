@@ -720,7 +720,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v47";
+const APP_VERSION = "v48";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -776,6 +776,23 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     if (ctx.state !== "running") { try { ctx.resume(); } catch {} }
   }
   let lastProc = 0, dogTimer = null, peak = 0.05, gain = 1, level = 0;
+  // close-voice only: remember how loud each bit of sound was, so a far-away voice (another postman) can be ignored
+  let sentSec = 0, frames = [], segStart = null, segEnd = 0; const myLevels = [];
+  const closeOnly = (() => { try { return new URLSearchParams(location.search).get("close") !== "off" && localStorage.getItem("rl-close") !== "off"; } catch { return true; } })();
+  function uttLevel() { let mx = 0; for (const [t, r] of frames) if (t >= segStart - 0.05 && t <= segEnd + 0.15 && r > mx) mx = r; return mx; }
+  // the user's own voice level = the loud end of recent names; far voices are well below it
+  function isFar(lv) {
+    if (!closeOnly || !lv) return false;
+    const srt = myLevels.slice().sort((a, b) => a - b), ref = srt.length >= 3 ? srt[Math.floor(srt.length * 0.7)] : 0;
+    const far = ref > 0 && lv < ref * 0.3;
+    if (!far) { myLevels.push(lv); if (myLevels.length > 20) myLevels.shift(); }
+    return far;
+  }
+  function emit(out) {
+    const lv = segStart == null ? 0 : uttLevel(); segStart = null;
+    if (isFar(lv)) { try { opts.onFar && opts.onFar(out); } catch {} return; }
+    onTranscript(out, true);
+  }
   const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   async function openMic() {
     unlockAudio();
@@ -798,6 +815,7 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
       level = Math.min(1, rms * gain * 6); try { opts.onLevel && opts.onLevel(level); } catch {}
       if (!want || !ws || ws.readyState !== 1 || muted) return;
       const n = Math.floor(inp.length / ratio), out = new Int16Array(n);
+      sentSec += n / 16000; frames.push([sentSec, rms]); if (frames.length > 400) frames.splice(0, 100);
       if (IOS) {   // average each group of samples (cleaner than skipping) and lift quiet voices
         for (let i = 0; i < n; i++) { const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio)); let sum = 0; for (let j = a; j < b; j++) sum += inp[j]; let v = (sum / (b - a)) * gain; v = v > 1 ? 1 : v < -1 ? -1 : v; out[i] = v < 0 ? v * 0x8000 : v * 0x7fff; }
       } else {
@@ -831,7 +849,7 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
       if (!(want || standby)) { connecting = false; return; }
       const sock = new WebSocket(wsUrl(), ["bearer", token]);
       ws = sock;
-      sock.onopen = () => { connecting = false; if (ws !== sock) return; if (want) { set("listening"); ready(); } clearInterval(keepTimer); keepTimer = setInterval(() => { try { sock.readyState === 1 && sock.send(JSON.stringify({ type: "KeepAlive" })); } catch {} }, 8000); };
+      sock.onopen = () => { sentSec = 0; frames = []; segStart = null; connecting = false; if (ws !== sock) return; if (want) { set("listening"); ready(); } clearInterval(keepTimer); keepTimer = setInterval(() => { try { sock.readyState === 1 && sock.send(JSON.stringify({ type: "KeepAlive" })); } catch {} }, 8000); };
       sock.onmessage = ev => {
         if (ws !== sock || muted || !want) return;
         let m; try { m = JSON.parse(ev.data); } catch { return; }
@@ -839,11 +857,11 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
           const t = ((m.channel && m.channel.alternatives && m.channel.alternatives[0] && m.channel.alternatives[0].transcript) || "").trim();
           if (t && (speaking || Date.now() < echoUntil) && isEcho(t)) return;   // the phone hearing its own reply — ignore
           if (t && speaking) hush();                                             // a new name while it's replying: cut the reply short
-          if (m.is_final) { if (t) finals = (finals + " " + t).trim(); }
+          if (m.is_final) { if (t) { finals = (finals + " " + t).trim(); if (typeof m.start === "number") { if (segStart == null) segStart = m.start; segEnd = m.start + (m.duration || 0); } } }
           else if (t) { lastInterim = (finals + " " + t).trim(); onTranscript(lastInterim, false); }
-          if (m.speech_final && finals) { const out = finals; finals = ""; lastInterim = ""; onTranscript(out, true); }
+          if (m.speech_final && finals) { const out = finals; finals = ""; lastInterim = ""; emit(out); }
         } else if (m.type === "UtteranceEnd") {
-          if (finals) { const out = finals; finals = ""; lastInterim = ""; onTranscript(out, true); }
+          if (finals) { const out = finals; finals = ""; lastInterim = ""; emit(out); }
         }
       };
       sock.onerror = () => {};
@@ -1539,6 +1557,7 @@ function renderRoute(B) {
   const onLevel = (() => { let t = 0; return lv => { const n = performance.now(); if (n - t < 90) return; t = n; const el = document.querySelector("[data-lvl]"); if (el) el.style.transform = `scaleY(${Math.max(0.08, lv).toFixed(2)})`; }; })();
   let engine = lsGet("rl-engine") === "apple" ? createVoice(...vArgs) : createDeepgramVoice(...vArgs, {
     token, keyterms: () => routeKeyterms(all), onLevel,
+    onFar: t => { S.query = ""; qEl.value = ""; drawList(); logSearch("(far voice) " + t, "chatter", "", null, []); },
     onFail: e => {
       console.warn("[Deepgram] falling back to Apple speech:", e);
       const ready = engine.onReady; try { engine.stop(); } catch {}
