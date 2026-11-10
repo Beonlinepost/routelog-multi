@@ -224,17 +224,49 @@ function matchStop(stop, raw) {
   return matchSingle(stop, q, RI_CFG) || { matched: false, kind: "none" };
 }
 function stopMatches(stop, raw) { return matchStop(stop, raw).matched; }
-/* Eircode said or typed: "F94 W9X5", "F 9 4 W 9 X 5", or just the last four "W9X5" */
-const NUMWORDS = { zero: "0", oh: "0", one: "1", two: "2", to: "2", too: "2", three: "3", four: "4", for: "4", five: "5", six: "6", seven: "7", eight: "8", ate: "8", nine: "9" };
+/* Eircode said or typed: "F94 W9X5", "eff ninety four double u nine ex five", or just the last four "W9X5" (all Donegal is F94) */
+const NUMWORDS = { zero: "0", oh: "0", o: "0", nought: "0", one: "1", won: "1", two: "2", to: "2", too: "2", three: "3", tree: "3", four: "4", for: "4", fore: "4", five: "5", six: "6", seven: "7", eight: "8", ate: "8", nine: "9", ten: "10", eleven: "11", twelve: "12", thirteen: "13", fourteen: "14", fifteen: "15", sixteen: "16", seventeen: "17", eighteen: "18", nineteen: "19" };
+const TENWORDS = { twenty: "2", thirty: "3", forty: "4", fourty: "4", fifty: "5", sixty: "6", seventy: "7", eighty: "8", ninety: "9" };
+const LETTERWORDS = { a: "A", ay: "A", eh: "A", see: "C", sea: "C", cee: "C", dee: "D", d: "D", e: "E", ee: "E", eff: "F", ef: "F", aitch: "H", haitch: "H", kay: "K", k: "K", en: "N", n: "N", pee: "P", p: "P", pea: "P", are: "R", r: "R", ar: "R", tee: "T", tea: "T", t: "T", vee: "V", v: "V", w: "W", ex: "X", x: "X", why: "Y", wye: "Y", y: "Y",
+  b: "B", bee: "B", g: "G", gee: "G", j: "J", jay: "J", l: "L", el: "L", m: "M", em: "M", q: "Q", queue: "Q", s: "S", ess: "S", u: "U", you: "U", z: "Z", zed: "Z", i: "1", c: "C", f: "F", h: "H" };
+// turn what was heard into letters/digits; null if any word isn't a letter or number (so names never get treated as codes)
+function eircodeChars(raw) {
+  let w = String(raw || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+  if (w[0] === "eircode" || w[0] === "aircode" || w[0] === "air") { w = w.slice(w[1] === "code" ? 2 : 1); }
+  w = w.filter(x => x !== "and" && x !== "uh" && x !== "um");
+  if (!w.length) return null;
+  let out = "";
+  for (let i = 0; i < w.length; i++) {
+    const x = w[i];
+    if (x === "double" || x === "triple") {
+      if (w[i + 1] === "you" || w[i + 1] === "u") { out += x === "double" ? "W" : ""; i++; continue; }   // "double you" = W
+      const nx = w[i + 1]; const ch = nx && (NUMWORDS[nx] || LETTERWORDS[nx] || (/^[a-z0-9]$/.test(nx) ? nx.toUpperCase() : null));
+      if (!ch) return null; out += ch.repeat(x === "double" ? 2 : 3); i++; continue;
+    }
+    if (TENWORDS[x]) { const nx = w[i + 1], u = nx && NUMWORDS[nx]; if (u && u.length === 1 && u !== "0") { out += TENWORDS[x] + u; i++; } else out += TENWORDS[x] + "0"; continue; }
+    if (NUMWORDS[x]) { out += NUMWORDS[x]; continue; }
+    if (LETTERWORDS[x]) { out += LETTERWORDS[x]; continue; }
+    if (/^[a-z0-9]{1,7}$/.test(x) && (x.length === 1 || /\d/.test(x))) { out += x.toUpperCase(); continue; }   // "f94", "w3xy"
+    return null;
+  }
+  return out.replace(/O/g, "0").replace(/I/g, "1");
+}
 function eircodeKey(raw) {
-  const k = raw.toLowerCase().split(/[\s,.-]+/).map(w => NUMWORDS[w] ?? w).join("").replace(/[^a-z0-9]/g, "").toUpperCase();
+  const k = eircodeChars(raw); if (!k) return null;
   if (/^[A-Z]\d[0-9W][A-Z0-9]{4}$/.test(k)) return k;            // full code
   if (/^[A-Z0-9]{4}$/.test(k) && /\d/.test(k) && /[A-Z]/.test(k)) return k; // unique last four
   return null;
 }
-function eircodeMatches(stops, raw) {
+const ecOf = s => (s.eircode || "").replace(/\s/g, "").toUpperCase();
+function ecDiff(a, b) { if (a.length !== b.length) return 9; let d = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++; return d; }
+function eircodeMatches(stops, raw, loose) {
   const k = eircodeKey(raw); if (!k) return null;
-  const hits = stops.filter(s => { const e = (s.eircode || "").replace(/\s/g, "").toUpperCase(); return e.length === 7 && (e === k || (k.length === 4 && e.endsWith(k))); });
+  const last = k.length === 7 ? k.slice(3) : k;
+  let hits = stops.filter(s => { const e = ecOf(s); return e.length === 7 && (e === k || e.slice(3) === last); });
+  if (!hits.length && loose) {   // one letter misheard (e.g. "V" for "P") — only if exactly one house is that close
+    const near = stops.filter(s => { const e = ecOf(s); return e.length === 7 && ecDiff(e.slice(3), last) === 1; });
+    const codes = new Set(near.map(ecOf)); if (codes.size === 1) hits = near;
+  }
   return hits.length ? hits : null;
 }
 /* "Laura and Vincent Gallagher" → the house where both live */
@@ -686,7 +718,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v43";
+const APP_VERSION = "v44";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -1621,6 +1653,32 @@ function renderRoute(B) {
   async function onTranscript(text, isFinal) {
     S.query = text; qEl.value = text; S.riPick = null; S.parcelList = false; drawList();
     if (!isFinal) return;
+    /* ---- eircode by voice: "F94 W3XY" or just "W3XY". People spell it with pauses, so bits heard within 3s are joined ---- */
+    {
+      const joined = S.ecBuf && Date.now() - S.ecAt < 3000 ? S.ecBuf + " " + text : null;
+      const tryOne = raw => { const h = eircodeMatches(all, raw, true); return h ? { raw, h } : null; };
+      const got = (joined && tryOne(joined)) || tryOne(text);
+      if (got) {
+        S.ecBuf = null; S.searchStart = S.searchStart || Date.now();
+        const h = got.h, code = h[0].eircode || ecOf(h[0]);
+        if (h.length === 1) { const st = h[0], nm = spokenName(st, matchStop(st, "")) || st.businessName || splitPipe(st.residents)[0] || "";
+          S.query = code; qEl.value = code; S.riPick = st; drawList(); flashCard(st.id, `✓ Box ${window.__boxOf?.get(st.sectionId) ?? ""}`); logLetter(st);
+          return say(callout(st, nm), got.raw, "found", st, h); }
+        S.query = code; qEl.value = code; S.voiceList = h; S.voiceListQ = got.raw; drawList();
+        return say(`${h.length} houses share that eircode. Tap the house`, got.raw, "list", null, h);
+      }
+      const usePart = eircodeChars(joined || "") ? joined : text;
+      const pc = eircodeChars(usePart);
+      if (pc && pc.length < 7 && (/^F9?4?/.test(pc) && pc[0] === "F" || (/\d/.test(pc) && pc.length < 4))) {   // half a code so far — wait for the rest, say nothing
+        S.ecBuf = usePart; S.ecAt = Date.now(); S.query = pc; qEl.value = pc; return;
+      }
+      S.ecBuf = null;
+      if (pc && /\d/.test(pc) && /[A-Z]/.test(pc) && (pc.length === 4 || pc.length === 7)) {   // sounded like an eircode but no house has it
+        const shown = pc.length === 7 ? pc.slice(0, 3) + " " + pc.slice(3) : pc;
+        S.query = shown; qEl.value = shown; drawList(); S.searchStart = Date.now();
+        return say(`No house with eircode ${shown.split("").join(" ")}`, usePart, "no-match", null, []);
+      }
+    }
     const t = cleanHeard(text); if (!t) return;
     if (t !== text.trim()) { S.query = t; qEl.value = t; }
     S.searchStart = Date.now(); S.lastLetter = null;
