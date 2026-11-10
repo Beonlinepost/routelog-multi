@@ -720,7 +720,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v46";
+const APP_VERSION = "v47";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -775,23 +775,34 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     if (!ctx || ctx.state === "closed") ctx = new AC();
     if (ctx.state !== "running") { try { ctx.resume(); } catch {} }
   }
-  let lastProc = 0, dogTimer = null;
+  let lastProc = 0, dogTimer = null, peak = 0.05, gain = 1, level = 0;
+  const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   async function openMic() {
     unlockAudio();
     const live = stream && stream.getAudioTracks().some(t => t.readyState === "live" && !t.muted);
     if (live && proc) return;
     try { proc && (proc.onaudioprocess = null, proc.disconnect()); src && src.disconnect(); } catch {}
     try { stream && stream.getTracks().forEach(t => t.stop()); } catch {}
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    // iPhone: Safari's noise filter squashes voices and turns the level down — switch it off and boost the sound ourselves
+    stream = await navigator.mediaDevices.getUserMedia({ audio: IOS ? { echoCancellation: true, noiseSuppression: false, autoGainControl: true, channelCount: 1 } : { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
     if (ctx.state !== "running") { try { await ctx.resume(); } catch {} }
     src = ctx.createMediaStreamSource(stream);
     proc = ctx.createScriptProcessor(4096, 1, 1);
     const ratio = ctx.sampleRate / 16000;
     proc.onaudioprocess = e => {
       lastProc = Date.now();
+      const inp = e.inputBuffer.getChannelData(0);
+      let pk = 0, sq = 0; for (let i = 0; i < inp.length; i += 4) { const a = Math.abs(inp[i]); sq += a * a; if (a > pk) pk = a; }
+      const rms = Math.sqrt(sq / (inp.length / 4));
+      if (IOS) { if (pk > peak) peak = pk; else peak = Math.max(0.02, peak * 0.995); gain = Math.min(6, Math.max(1, 0.5 / peak)); }
+      level = Math.min(1, rms * gain * 6); try { opts.onLevel && opts.onLevel(level); } catch {}
       if (!want || !ws || ws.readyState !== 1 || muted) return;
-      const inp = e.inputBuffer.getChannelData(0), n = Math.floor(inp.length / ratio), out = new Int16Array(n);
-      for (let i = 0; i < n; i++) { const v = inp[Math.floor(i * ratio)]; out[i] = v < 0 ? Math.max(-1, v) * 0x8000 : Math.min(1, v) * 0x7fff; }
+      const n = Math.floor(inp.length / ratio), out = new Int16Array(n);
+      if (IOS) {   // average each group of samples (cleaner than skipping) and lift quiet voices
+        for (let i = 0; i < n; i++) { const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio)); let sum = 0; for (let j = a; j < b; j++) sum += inp[j]; let v = (sum / (b - a)) * gain; v = v > 1 ? 1 : v < -1 ? -1 : v; out[i] = v < 0 ? v * 0x8000 : v * 0x7fff; }
+      } else {
+        for (let i = 0; i < n; i++) { const v = inp[Math.floor(i * ratio)]; out[i] = v < 0 ? Math.max(-1, v) * 0x8000 : Math.min(1, v) * 0x7fff; }
+      }
       ws.send(out.buffer);
     };
     src.connect(proc); proc.connect(ctx.destination);
@@ -1524,8 +1535,10 @@ function renderRoute(B) {
   const vArgs = [(t, fin) => onTranscript(t, fin), vErr, () => drawMic()];
   // Deepgram first (fast, knows the route's names); if it can't connect, fall back to Apple's speech automatically
   try { const e = new URLSearchParams(location.search).get("engine"); if (e === "apple" || e === "deepgram") lsSet("rl-engine", e); } catch {}
+  try { const w = new URLSearchParams(location.search).get("who"); if (w) lsSet("rl-who", w.slice(0, 20)); } catch {}
+  const onLevel = (() => { let t = 0; return lv => { const n = performance.now(); if (n - t < 90) return; t = n; const el = document.querySelector("[data-lvl]"); if (el) el.style.transform = `scaleY(${Math.max(0.08, lv).toFixed(2)})`; }; })();
   let engine = lsGet("rl-engine") === "apple" ? createVoice(...vArgs) : createDeepgramVoice(...vArgs, {
-    token, keyterms: () => routeKeyterms(all),
+    token, keyterms: () => routeKeyterms(all), onLevel,
     onFail: e => {
       console.warn("[Deepgram] falling back to Apple speech:", e);
       const ready = engine.onReady; try { engine.stop(); } catch {}
@@ -1535,7 +1548,7 @@ function renderRoute(B) {
   });
   const voice = new Proxy({}, { get: (_, k) => engine[k], set: (_, k, v) => { engine[k] = v; return true; } });
   voice.onReady = ms => { S.searchStart = Date.now() - ms; const ua = navigator.userAgent, dev = /iPhone/.test(ua) ? "iPhone" + ((ua.match(/OS (\d+)_/) || [])[1] ? " iOS " + ua.match(/OS (\d+)_/)[1] : "") : /Android/.test(ua) ? "Android" : "Computer";
-    logSearch("(mic switched on)", "mic-start", `Mic ready in ${(ms / 1000).toFixed(1)}s · ${dev} · ${voice.engine || "apple"} · ${APP_VERSION}`, null, []); drawMic(); };
+    logSearch("(mic switched on)", "mic-start", `Mic ready in ${(ms / 1000).toFixed(1)}s · ${dev} · ${voice.engine || "apple"} · ${APP_VERSION}${lsGet("rl-who") ? " · " + lsGet("rl-who") : ""}`, null, []); drawMic(); };
   if (!window.__rlVisHook) { window.__rlVisHook = true;
     const away = () => { try { window.__rlVoice && window.__rlVoice.reset(); window.speechSynthesis?.cancel(); } catch {} };
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") away(); });
@@ -1880,7 +1893,7 @@ function renderRoute(B) {
     b.title = hear ? "Listening — talk now" : on ? "Starting the mic…" : st === "speaking" ? "Speaking…" : "Voice search";
     b.className = `shrink-0 px-2 py-2 rounded-full transition-all flex items-center gap-1 ${hear ? "bg-red-500 text-white" : on ? "text-white animate-pulse" : st === "speaking" ? "bg-accent text-accent-foreground animate-pulse" : "bg-white/20 text-primary-foreground hover:bg-white/30"}`;
     b.style.background = on && !hear ? "#d97706" : "";
-    b.innerHTML = icon(hear || on ? "micOff" : "mic", 16) + (hear ? `<span style="font-size:11px;font-weight:800">TALK</span>` : on ? `<span style="font-size:11px;font-weight:800">WAIT</span>` : "");
+    b.innerHTML = icon(hear || on ? "micOff" : "mic", 16) + (hear ? `<span style="font-size:11px;font-weight:800">TALK</span><span data-lvl style="display:inline-block;width:5px;height:16px;background:#fff;border-radius:2px;transform-origin:bottom;transform:scaleY(.08);transition:transform .08s"></span>` : on ? `<span style="font-size:11px;font-weight:800">WAIT</span>` : "");
   }
   function drawTabs() {
     $("[data-tabs]").innerHTML = sections.map(x => {
