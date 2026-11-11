@@ -480,7 +480,7 @@ const IRISH_SOUNDS = {
   odhran: ["oran", "orin", "oren", "odran", "orrin", "orran", "oarn", "orinn", "oren", "aran"], cian: ["kian", "keon", "keyan", "keeon", "kean", "kyan", "keanu", "ian", "keen"],
   eimear: ["emer", "eemer", "emma", "amir", "emir", "eamer", "ember", "eema", "imir"], aideen: ["adeen", "adine", "adina", "aideen", "ideen", "a dean", "adene", "aiden"],
   rua: ["ruah", "rooa", "ruha", "rue a", "ruba", "roo"], roise: ["rosha", "rosie", "rose", "roshe", "rosa", "roshi", "roisha", "rosh"], bhaoill: ["wheel", "weel", "whale", "wil", "will", "boyle", "bweel", "veel"], ni: ["nee", "knee", "nie", "ne", "nay"],
-  morag: ["moraq", "maureg", "morrog", "moreg", "morak", "morog", "moragh"], owenie: ["oweny", "owney", "owny", "oney", "ohweenie", "ownie", "owenee", "oweenie", "o'weenie", "joanie", "toni"],
+  morag: ["moraq", "maureg", "morrog", "moreg", "morak", "morog", "moragh"], owenie: ["oweny", "owney", "owny", "oney", "ohweenie", "ownie", "owenee", "oweenie", "o'weenie", "joanie", "toni", "eoey", "owey", "oweenie", "eweny", "uni", "ewnie"],
   forker: ["forca", "forka", "forkor", "forcer", "porker", "focker", "forkner"], conal: ["connell", "conall", "connel", "conal"], ellen: ["helen", "allen", "elan", "ellan", "ellyn"],
   padraig: ["podrick", "podraig", "pawdrig", "pauric", "porig", "padrig", "paudrick", "podric", "poderick", "pordrick", "padrick", "padric", "patrick"],
   daithi: ["dahi", "dahee", "dawhee", "daahi", "dahey", "dohi", "doughy", "dahy", "darhi", "dahie", "daihi", "dahei", "dahee", "dye he", "dahhi", "david"],
@@ -495,7 +495,7 @@ const IRISH_SOUNDS = {
 };
 const IRISH_FROM = (() => { const m = new Map(); Object.entries(IRISH_SOUNDS).forEach(([real, list]) => list.forEach(x => { if (!m.has(x)) m.set(x, []); if (!m.get(x).includes(real)) m.get(x).push(real); })); return m; })();
 /* Rewrite what the phone heard into Irish spellings: "Kiva McEnhall" → "caoimhe macenhill" (null if nothing changed) */
-const IRISH_PHRASES = [[/\bfork her\b/g, "forker"], [/\bnee wheel\b|\bknee wheel\b|\bnee weel\b|\bnew wheel\b|\bneat wheel\b|\bnivio\b|\bnivea\b|\bneevil\b|\bnivel\b|\bnee vil\b|\bknievel\b|\bnee will\b/g, "ni bhaoill"], [/\bo weenie\b|\boh weenie\b|\bo eany\b/g, "owenie"], [/\bmy red\b|\bmy raid\b|\bmare ad\b|\bmar aid\b|\bmore aid\b|\bmy rad\b/g, "mairead"], [/\bmac en hill\b|\bmc en hill\b|\bmack and hill\b|\bmac and hill\b/g, "mcenhill"], [/\bmac cafferty\b|\bmc cafferty\b/g, "mccafferty"]];
+const IRISH_PHRASES = [[/\bfork her\b/g, "forker"], [/\bnee wheel\b|\bknee wheel\b|\bnee weel\b|\bnew wheel\b|\bneat wheel\b|\bnivio\b|\bnivea\b|\bneevil\b|\bnivel\b|\bnee vil\b|\bknievel\b|\bnee will\b/g, "ni bhaoill"], [/\bo weenie\b|\boh weenie\b|\bo eany\b|\byou need\b|\byou knee\b|\bow knee\b|\bo knee\b/g, "owenie"], [/\bmy red\b|\bmy raid\b|\bmare ad\b|\bmar aid\b|\bmore aid\b|\bmy rad\b/g, "mairead"], [/\bmac en hill\b|\bmc en hill\b|\bmack and hill\b|\bmac and hill\b/g, "mcenhill"], [/\bmac cafferty\b|\bmc cafferty\b/g, "mccafferty"]];
 function irishVersions(t) {
   let changed = false;
   let base = String(t || "").toLowerCase();
@@ -720,7 +720,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v48";
+const APP_VERSION = "v49";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -1749,14 +1749,21 @@ function renderRoute(B) {
       }
       return;
     }
-    if (/^(hello|hiya|hi|hey|ok|okay|yeah|yes|no|test|testing|right|grand|sorry)$/i.test(t) || /^call (out|it|back)\b/i.test(t)) { S.query = ""; qEl.value = ""; drawList(); logSearch(t, "chatter", "", null, []); return; }   // plain talk, not a name
+    if (/^(hello|hiya|hi|hey|ok|okay|yeah|yes|no|test|testing|right|grand|sorry)$/i.test(t) || (/^call (out|it|back)\b/i.test(t) && !surnameNear(t))) { S.query = ""; qEl.value = ""; drawList(); logSearch(t, "chatter", "", null, []); return; }   // plain talk, not a name
     const r = await resolve(t);
     if (t.split(/\s+/).length >= 5 && !(r.stop && (r.sure || r.learned || ((r.level === 1 || r.level === 2) && !r.weak)))) { S.query = ""; qEl.value = ""; drawList(); logSearch(t, "chatter", "", null, []); return; }   // talking, not calling a name
     S.lastCtx = ctx(t, r.level, r.results);
     const multiWord = t.split(/\s+/).filter(Boolean).length >= 2;
     if (r.ri) { const nm = nameFor(r.stop, t); S.query = nm || t; qEl.value = S.query; S.riPick = r.stop; drawList(); flashCard(r.stop.id, `✓ Box ${window.__boxOf?.get(r.stop.sectionId) ?? ""}`); logLetter(r.stop); return say(callout(r.stop, nm), t, "found", r.stop, r.results, r.learned); }
     if (!r.results.length) {
-      if (looksLikeChatter(t)) { S.query = ""; qEl.value = ""; drawList(); logSearch(t, "chatter", "", null, []); return; }   // not a name — stay quiet
+      // the surname is on the route but this first name isn't (e.g. "Linda McBride") — show every house with that surname to tap
+      const kin = surnameKin(pool(), t, []);
+      if (kin.length && multiWord && t.split(/\s+/).length <= 4) {
+        S.voiceList = kin; S.voiceListQ = t; S.lastCtx = { ...S.lastCtx, timestamp: Date.now() + 10000 }; drawList();
+        const sn = t.split(/\s+/).slice(-1)[0];
+        return say(kin.length === 1 ? `Is it ${callout(kin[0], nameFor(kin[0], t), true)}? Tap to confirm` : `Which ${sn}? ${kin.length} houses. Tap the house`, t, "list", null, kin);
+      }
+      if (looksLikeChatter(t) && !surnameNear(t)) { S.query = ""; qEl.value = ""; drawList(); logSearch(t, "chatter", "", null, []); return; }   // not a name — stay quiet
       say(multiWord ? `No exact match found for ${t}` : `No match for ${t}`, t, "no-match", null, []); openSaveNameModal({ transcript: t, stops: all, onSave: saveName }); return;
     }
     if (r.guess) {
@@ -1952,10 +1959,20 @@ function renderRoute(B) {
     if (w.length >= 2 && /^(mc|mac|o|o'|ni|nic|ui|mhic|de)$/i.test(w[w.length - 2])) last = w[w.length - 2] + last;
     return snKey(last);
   }
+  // does the last word sound like a surname on this route? ("mcarvey" ≈ McGarvey) — then it's a name, not chatter
+  let _snSet = null;
+  function surnameNear(q) {
+    if (!_snSet) { _snSet = new Set(); all.forEach(st => splitPipe(st.residents).forEach(r => { const w = r.trim().split(/\s+/); if (w.length > 1) _snSet.add(snKey(w[w.length - 1])); })); }
+    const k = spokenSurname(q); if (!k || k.length < 4) return false;
+    if (_snSet.has(k)) return true;
+    for (const x of _snSet) if (Math.abs(x.length - k.length) <= 2 && x[0] === k[0] && levenshtein(x, k) <= (k.length >= 7 ? 2 : 1)) return true;
+    return false;
+  }
   function surnameKin(P, q, have) {
     const k = spokenSurname(q); if (!k || k.length < 3) return [];
     const ids = new Set((have || []).map(x => x.id)), first = snKey(String(q).trim().split(/\s+/)[0]);
-    const hit = P.filter(st => !ids.has(st.id) && splitPipe(st.residents).some(r => { const w = r.trim().split(/\s+/); return w.length > 1 && snKey(w[w.length - 1]) === k || (w.length > 2 && snKey(w[w.length - 2] + w[w.length - 1]) === k); }));
+    const same = x => x === k || (k.length >= 5 && x[0] === k[0] && Math.abs(x.length - k.length) <= 2 && levenshtein(x, k) <= (k.length >= 7 ? 2 : 1));   // "mcarvey" ≈ mcgarvey
+    const hit = P.filter(st => !ids.has(st.id) && splitPipe(st.residents).some(r => { const w = r.trim().split(/\s+/); return w.length > 1 && same(snKey(w[w.length - 1])) || (w.length > 2 && same(snKey(w[w.length - 2] + w[w.length - 1]))); }));
     const close = st => Math.max(0, ...splitPipe(st.residents).map(r => { const f = snKey(r.split(/\s+/)[0]); return f[0] === first[0] ? 1 + (f.slice(0, 2) === first.slice(0, 2) ? 1 : 0) : 0; }));
     return hit.sort((a, b) => close(b) - close(a));
   }
