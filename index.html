@@ -225,7 +225,7 @@ function matchStop(stop, raw) {
 }
 function stopMatches(stop, raw) { return matchStop(stop, raw).matched; }
 /* Eircode said or typed: "F94 W9X5", "eff ninety four double u nine ex five", or just the last four "W9X5" (all Donegal is F94) */
-const NUMWORDS = { zero: "0", oh: "0", o: "0", nought: "0", one: "1", won: "1", two: "2", to: "2", too: "2", three: "3", tree: "3", four: "4", for: "4", fore: "4", five: "5", six: "6", seven: "7", eight: "8", ate: "8", nine: "9", ten: "10", eleven: "11", twelve: "12", thirteen: "13", fourteen: "14", fifteen: "15", sixteen: "16", seventeen: "17", eighteen: "18", nineteen: "19" };
+const NUMWORDS = { zero: "0", oh: "0", o: "0", nought: "0", one: "1", won: "1", two: "2", to: "2", too: "2", three: "3", tree: "3", four: "4", for: "4", fore: "4", five: "5", six: "6", seven: "7", eight: "8", ate: "8", it: "8", eat: "8", edit: "88", ait: "8", eh8: "8", nine: "9", ten: "10", eleven: "11", twelve: "12", thirteen: "13", fourteen: "14", fifteen: "15", sixteen: "16", seventeen: "17", eighteen: "18", nineteen: "19" };
 const TENWORDS = { twenty: "2", thirty: "3", forty: "4", fourty: "4", fifty: "5", sixty: "6", seventy: "7", eighty: "8", ninety: "9" };
 const LETTERWORDS = { a: "A", ay: "A", eh: "A", see: "C", sea: "C", cee: "C", dee: "D", d: "D", e: "E", ee: "E", eff: "F", ef: "F", aitch: "H", haitch: "H", kay: "K", k: "K", en: "N", n: "N", pee: "P", p: "P", pea: "P", are: "R", r: "R", ar: "R", or: "R", our: "R", oar: "R", tee: "T", tea: "T", t: "T", vee: "V", v: "V", w: "W", ex: "X", x: "X", why: "Y", wye: "Y", y: "Y",
   b: "B", bee: "B", g: "G", gee: "G", j: "J", jay: "J", l: "L", el: "L", m: "M", em: "M", q: "Q", queue: "Q", s: "S", ess: "S", u: "U", you: "U", z: "Z", zed: "Z", i: "1", c: "C", f: "F", h: "H" };
@@ -247,6 +247,7 @@ function eircodeChars(raw) {
     if (NUMWORDS[x]) { out += NUMWORDS[x]; continue; }
     if (LETTERWORDS[x]) { out += LETTERWORDS[x]; continue; }
     if (/^[a-z0-9]{1,7}$/.test(x) && (x.length === 1 || /\d/.test(x))) { out += x.toUpperCase(); continue; }   // "f94", "w3xy"
+    if (/^[acdefhknprtvwxy]{2,3}$/.test(x)) { out += x.toUpperCase(); continue; }   // letters run together: "av", "hk"
     return null;
   }
   return ecFix(out);
@@ -720,7 +721,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v49";
+const APP_VERSION = "v50";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
