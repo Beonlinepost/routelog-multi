@@ -893,15 +893,23 @@ async function tabField(body) {
   const isIssue = o => !o.fixed && !isChatter(o) && !isLearned(o) && (o.outcome === "no-match" || o.outcome === "list");
   function draw(allIn) {
     const micStarts = allIn.filter(o => o.outcome === "mic-start" && o.response_time_ms != null).map(o => o.response_time_ms);
+    // reply time (v51+): finished saying the name → reply voice starts. Phone type comes from the last "mic switched on" line
+    const REPLY_SINCE = "2026-11-12T16:00:00Z", rep = { iPhone: [], Android: [], other: [] };
+    let dev = "other"; allIn.slice().sort((a, b) => a.created_at < b.created_at ? -1 : 1).forEach(o => {
+      if (o.outcome === "mic-start") { dev = /iPhone/.test(o.spoken || "") ? "iPhone" : /Android/.test(o.spoken || "") ? "Android" : "other"; return; }
+      if (o.created_at >= REPLY_SINCE && o.response_time_ms > 0 && o.response_time_ms < 15000 && ["found", "list", "no-match"].includes(o.outcome)) { rep[dev].push(o.response_time_ms); o._reply = o.response_time_ms; }
+    });
+    const avgS = a => a.length ? (a.reduce((x, y) => x + y, 0) / a.length / 1000).toFixed(1) + "s" : "—";
+    const replyAll = [...rep.iPhone, ...rep.Android, ...rep.other];
     const all = allIn.filter(o => o.outcome !== "mic-start");
     learnedOk = new Set(all.filter(x => x.manual_correction_made || (x.outcome === "found" && x.learned_mapping_used)).map(x => (x.original_transcript || "").trim().toLowerCase()));
     const g = fieldStats(all), ev = onlyIssues ? all.filter(isIssue) : all, v = g.voiceSearches - 0;
     const tile = (l, val, sub) => `<div class="p-4 bg-card rounded-lg border border-border"><div class="text-sm text-muted-foreground">${l}</div><div class="text-3xl font-bold text-foreground mt-2">${val}</div>${sub ? `<div class="text-xs text-muted-foreground mt-1">${sub}</div>` : ""}</div>`;
     inner.innerHTML = !all.length ? `<div class="${card} text-center text-muted-foreground">No voice searches logged yet. Use the mic in the app — every search appears here within 20 seconds.</div>` : `
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-6">
         ${tile("Voice searches", g.totalSearches)}${tile("Right first time", pct(g.firstTime, g.totalSearches) + "%", `${g.firstTime} searches`)}
         ${tile("Needed a tap", g.corrected, "postman picked the house")}${tile("No match", g.noMatch, "nothing found")}
-        ${tile("Parcels by voice", g.parcels)}${tile("Mic start (avg)", micStarts.length ? (micStarts.reduce((a, b) => a + b, 0) / micStarts.length / 1000).toFixed(1) + "s" : "—", micStarts.length ? `slowest ${(Math.max(...micStarts) / 1000).toFixed(1)}s · ${micStarts.length} starts` : "time from tap to listening")}
+        ${tile("Reply time (avg)", avgS(replyAll), replyAll.length ? `iPhone ${avgS(rep.iPhone)} · Android ${avgS(rep.Android)}` : "finished name → reply starts")}${tile("Parcels by voice", g.parcels)}${tile("Mic start (avg)", micStarts.length ? (micStarts.reduce((a, b) => a + b, 0) / micStarts.length / 1000).toFixed(1) + "s" : "—", micStarts.length ? `slowest ${(Math.max(...micStarts) / 1000).toFixed(1)}s · ${micStarts.length} starts` : "time from tap to listening")}
       </div>
       <div class="${card} overflow-x-auto mb-6"><table class="w-full text-sm"><thead><tr class="text-left text-muted-foreground border-b border-border">
         <th class="py-2 pr-3">When</th><th class="py-2 pr-3">Heard</th><th class="py-2 pr-3">App said</th><th class="py-2 pr-3">Result</th><th class="py-2 pr-3">Right house</th><th class="py-2">Fix</th></tr></thead>
@@ -911,7 +919,7 @@ async function tabField(body) {
         return `<tr class="border-b border-border ${isIssue(o) ? "bg-orange-50/50" : ""}" data-eid="${o.id}">
           <td class="py-2 pr-3 whitespace-nowrap text-xs text-muted-foreground">${new Date(o.created_at).toLocaleTimeString("en-IE", { hour: "2-digit", minute: "2-digit" })}<br>${new Date(o.created_at).toLocaleDateString("en-IE", { day: "numeric", month: "short" })} · ${esc(o.app_mode || "")}${o.by_relief ? " · relief" : ""}</td>
           <td class="py-2 pr-3 font-semibold">“${esc(o.original_transcript || "")}”</td>
-          <td class="py-2 pr-3 text-muted-foreground">${esc(o.spoken || "")}</td>
+          <td class="py-2 pr-3 text-muted-foreground">${esc(o.spoken || "")}${o._reply ? `<div class="text-xs ${o._reply > 1500 ? "text-orange-600 font-semibold" : "text-muted-foreground/70"}">⏱ ${(o._reply / 1000).toFixed(1)}s</div>` : ""}</td>
           <td class="py-2 pr-3">${badge(o)}${o.learned_mapping_used ? ` <span class="text-xs text-muted-foreground">learned</span>` : ""}</td>
           <td class="py-2 pr-3">${st ? `${esc(st.business_name || splitPipe(st.residents)[0] || "")}<div class="text-xs text-muted-foreground">#${st.stop_order}</div>` : esc(o.selected_stop_name || "—")}</td>
           <td class="py-2 whitespace-nowrap">${!o.fixed && isLearned(o) && o.outcome !== "found" ? `<span class="text-xs text-emerald-700 font-semibold mr-2" title="The postman's tap saved this for good">Learned ✓</span><button data-pick="${o.id}" class="text-xs text-muted-foreground underline ml-1">change</button>` : o.fixed ? `<span class="text-xs text-emerald-700 font-semibold mr-2">Fixed ✓</span><button data-undo="${o.id}" class="${btnOutline} !py-1 text-xs" title="Take it back — the app forgets what it learned from this">Undo</button>` : `

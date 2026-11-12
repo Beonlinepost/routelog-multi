@@ -721,7 +721,7 @@ const root = () => $("#root");
 /* ---------- Voice recognition (port of useVoiceSearch) ---------- */
 const vlog = (m, x) => console.debug(`[Voice ${new Date().toLocaleTimeString()}]`, m, x ?? "");
 let _voice = null;
-const APP_VERSION = "v50";
+const APP_VERSION = "v51";
 /* How the voice says "Mc": Donegal-style short "M'" — the card still shows McGarvey. Change MC_SAYS to try another sound. */
 const MC_SAYS = "M'";
 function sayable(t) { return String(t || "").replace(/\|/g, ",").replace(/\bMc ?(?=[A-Za-z])/g, MC_SAYS); }
@@ -778,7 +778,7 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
   }
   let lastProc = 0, dogTimer = null, peak = 0.05, gain = 1, level = 0;
   // close-voice only: remember how loud each bit of sound was, so a far-away voice (another postman) can be ignored
-  let sentSec = 0, frames = [], segStart = null, segEnd = 0; const myLevels = [];
+  let sentSec = 0, frames = [], segStart = null, segEnd = 0, lastWordAt = 0; const myLevels = [];
   const closeOnly = (() => { try { return new URLSearchParams(location.search).get("close") !== "off" && localStorage.getItem("rl-close") !== "off"; } catch { return true; } })();
   function uttLevel() { let mx = 0; for (const [t, r] of frames) if (t >= segStart - 0.05 && t <= segEnd + 0.15 && r > mx) mx = r; return mx; }
   // the user's own voice level = the loud end of recent names; far voices are well below it
@@ -857,7 +857,8 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
         if (m.type === "Results") {
           const t = ((m.channel && m.channel.alternatives && m.channel.alternatives[0] && m.channel.alternatives[0].transcript) || "").trim();
           if (t && (speaking || Date.now() < echoUntil) && isEcho(t)) return;   // the phone hearing its own reply — ignore
-          if (t && speaking) hush();                                             // a new name while it's replying: cut the reply short
+          if (t && speaking) hush();
+          if (t) lastWordAt = Date.now();                                             // a new name while it's replying: cut the reply short
           if (m.is_final) { if (t) { finals = (finals + " " + t).trim(); if (typeof m.start === "number") { if (segStart == null) segStart = m.start; segEnd = m.start + (m.duration || 0); } } }
           else if (t) { lastInterim = (finals + " " + t).trim(); onTranscript(lastInterim, false); }
           if (m.speech_final && finals) { const out = finals; finals = ""; lastInterim = ""; emit(out); }
@@ -881,11 +882,13 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
     engine: "deepgram",
     get state() { return st; },
     get hearing() { return audioOn && !muted; },
+    get lastWordAt() { return lastWordAt; },
     unlock() { try { unlockAudio(); } catch {} },
     // Speak through the app's own sound engine (not the iPhone's speech), so the mic keeps running afterwards
-    async say(text) {
+    async say(text, onStart) {
       unlockAudio(); hushed = false;
-      const play = (bufs, lead) => { let t = ctx.currentTime + lead; for (const b of bufs) { const x = ctx.createBufferSource(); x.buffer = b; x.connect(ctx.destination); x.start(t); t += b.duration; playing.push(x); } return t; };
+      const started = when => { if (onStart) { const f = onStart; onStart = null; try { f(Date.now() + Math.max(0, (when - ctx.currentTime) * 1000)); } catch {} } };
+      const play = (bufs, lead) => { started(ctx.currentTime + lead); let t = ctx.currentTime + lead; for (const b of bufs) { const x = ctx.createBufferSource(); x.buffer = b; x.connect(ctx.destination); x.start(t); t += b.duration; playing.push(x); } return t; };
       let lastEnd = 0;
       const hit = ttsCache.get(text);
       if (hit) lastEnd = play(hit, 0.02);   // said this before: play instantly, no internet wait
@@ -905,7 +908,7 @@ function createDeepgramVoice(onTranscript, onError, onState, opts = {}) {
           for (let i = 0; i < n; i++) ch[i] = dv.getInt16(i * 2, true) / 32768;
           bufs.push(buf);
           const x = ctx.createBufferSource(); x.buffer = buf; x.connect(ctx.destination);
-          if (t === null) t = ctx.currentTime + 0.18;   // small cushion so a weak signal doesn't stutter
+          if (t === null) { t = ctx.currentTime + 0.18; started(t); }   // small cushion so a weak signal doesn't stutter
           if (t < ctx.currentTime) t = ctx.currentTime + 0.08;
           x.start(t); t += buf.duration; lastEnd = t; playing.push(x);
         }
@@ -1576,12 +1579,12 @@ function renderRoute(B) {
   window.__rlVoice = voice;
   try { voice.warm && voice.warm(); } catch {}
   if (!window.__rlWarmHook) { window.__rlWarmHook = true; document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { try { window.__rlVoice && window.__rlVoice.warm && window.__rlVoice.warm(); } catch {} } }); }
-  function speak(text) {
+  function speak(text, onStart) {
     if (voice.say) {   // Deepgram engine: speak through the same audio as the mic (iPhone keeps listening)
       voice.speakingStart(String(text || ""));
       let ended = false; const end = () => { if (!ended) { ended = true; voice.speakingEnd(0); } };
       const guard = setTimeout(end, 8000);
-      voice.say(String(text || "").replace(/\|/g, ",")).then(() => { clearTimeout(guard); end(); }, e => { console.warn("[Voice] Deepgram speak failed, using phone voice", e); clearTimeout(guard); end(); speakPhone(text, true); });
+      voice.say(String(text || "").replace(/\|/g, ","), onStart).then(() => { clearTimeout(guard); end(); }, e => { console.warn("[Voice] Deepgram speak failed, using phone voice", e); clearTimeout(guard); end(); speakPhone(text, true); });
       return;
     }
     speakPhone(text);
@@ -1605,10 +1608,10 @@ function renderRoute(B) {
   function callout(stop, name, full) {
     const p = [];
     if (S.mode === "sorting") {
-      let who = String(name || "").trim();
-      if (!full && who && !(stop.businessName && who === stop.businessName)) { const w = who.split(/\s+/); if (w.length > 1) who = /^(mr|mrs|ms|miss|dr|fr)\.?$/i.test(w[0]) ? w.slice(0, 2).join(" ") : w[0]; }
+      // v51: full name + "box N" ("Niall McCafferty, box 6") — the postman hears it's the right person without looking down
+      let who = String(name || "").trim() || stop.houseName || stop.businessName || "";
       const box = window.__boxOf?.get(stop.sectionId);
-      if (who) p.push(who); if (box != null) p.push(String(box)); else if (stop.road) p.push(stop.road);
+      if (who) p.push(who); if (box != null) p.push(`box ${box}`); else if (stop.road) p.push(stop.road);
       return p.join(", ");
     }
     else if (S.mode === "delivery") p.push(`Stop ${stop.stopOrder}`);
@@ -1619,6 +1622,7 @@ function renderRoute(B) {
 
   /* resolve a spoken name to exactly one stop (or null + results) */
   const nameFor = (stop, t) => {
+    if (stop.houseName) { const hn = norm(stop.houseName), q = norm(t); if (hn && q && (q === hn || (hn.length > 4 && q.includes(hn)) || confidence(q, hn) >= 0.88)) return stop.houseName; }
     const cp = coupleNames(t);
     if (cp) return spokenName(stop, matchStop(stop, cp[0]).matched ? matchStop(stop, cp[0]) : matchStop(stop, cp[1]));
     const m = matchStop(stop, t);
@@ -1628,6 +1632,7 @@ function renderRoute(B) {
   async function resolve(t) {
     const r1 = await resolveOnce(t);
     if (r1.stop && !r1.weak && (!r1.ri || r1.sure)) return r1;
+    { const sa = learnedSoundAlike(t, pool()); if (sa) return { stop: sa, results: [sa], level: 3, ri: true, learned: true, sure: true }; }
     if (r1.stop && !r1.weak) {
       // a sound-alike guess: if the Irish spelling gives an exact name ("Owney" → Owenie), that wins
       for (const t2 of irishVersions(t)) { const r2 = await resolveOnce(t2); if (r2.stop && r2.sure) return r2; }
@@ -1675,7 +1680,7 @@ function renderRoute(B) {
     if (!S.fieldTest) return;
     const name = stop ? (stop.businessName || splitPipe(stop.residents)[0] || `Stop ${stop.stopOrder}`) : null;
     const cand = (results || []).slice(0, 5).map(x => ({ stopId: x.id, stopName: splitPipe(x.residents)[0] || x.businessName || "", stopOrder: x.stopOrder }));
-    const ms = S.searchStart ? Date.now() - S.searchStart : null;
+    const ms = S.searchStart ? (S.replyAt && S.replyAt > S.searchStart ? S.replyAt : Date.now()) - S.searchStart : null; S.replyAt = 0;
     S.lastEventId = null;
     try {
       const { data } = await sb.rpc("log_search", { p_route_id: routeId, p_token: token, p_section_id: S.sectionId, p_heard: heard, p_outcome: outcome,
@@ -1683,18 +1688,24 @@ function renderRoute(B) {
       S.lastEventId = data ?? null; S.lastEventStopId = stop?.id ?? null;
     } catch (e) { console.warn("[FieldTest] log failed", e); }
   }
-  function say(text, heard, outcome, stop, results, learned) { speak(text); logSearch(heard, outcome, text, stop, results, learned); }
+  // log once the reply actually starts playing, so the log shows "finished speaking → reply started"
+  function say(text, heard, outcome, stop, results, learned) {
+    let logged = false; const log = () => { if (!logged) { logged = true; logSearch(heard, outcome, text, stop, results, learned); } };
+    speak(text, at => { if (S.heardAt) S.searchStart = S.heardAt; S.replyAt = at; log(); });
+    setTimeout(log, 3000);   // safety: log anyway if the voice never starts
+  }
 
   async function onTranscript(text, isFinal) {
     S.query = text; qEl.value = text; S.riPick = null; S.parcelList = false; drawList();
     if (!isFinal) return;
+    S.heardAt = (voice.lastWordAt && Date.now() - voice.lastWordAt < 5000) ? voice.lastWordAt : Date.now();
     /* ---- eircode by voice: "F94 W3XY" or just "W3XY". People spell it with pauses, so bits heard within 3s are joined ---- */
     {
       const joined = S.ecBuf && Date.now() - S.ecAt < 3000 ? S.ecBuf + " " + text : null;
       const tryOne = raw => { const h = eircodeMatches(all, raw, true); return h ? { raw, h } : null; };
       const got = (joined && tryOne(joined)) || tryOne(text);
       if (got) {
-        S.ecBuf = null; S.searchStart = S.searchStart || Date.now();
+        S.ecBuf = null; S.searchStart = S.heardAt || Date.now();
         const h = got.h, code = h[0].eircode || ecOf(h[0]);
         if (h.length === 1) { const st = h[0], nm = spokenName(st, matchStop(st, "")) || st.businessName || splitPipe(st.residents)[0] || "";
           S.query = code; qEl.value = code; S.riPick = st; drawList(); flashCard(st.id, `✓ Box ${window.__boxOf?.get(st.sectionId) ?? ""}`); logLetter(st);
@@ -1758,7 +1769,7 @@ function renderRoute(B) {
     if (r.ri) { const nm = nameFor(r.stop, t); S.query = nm || t; qEl.value = S.query; S.riPick = r.stop; drawList(); flashCard(r.stop.id, `✓ Box ${window.__boxOf?.get(r.stop.sectionId) ?? ""}`); logLetter(r.stop); return say(callout(r.stop, nm), t, "found", r.stop, r.results, r.learned); }
     if (!r.results.length) {
       // the surname is on the route but this first name isn't (e.g. "Linda McBride") — show every house with that surname to tap
-      const kin = surnameKin(pool(), t, []);
+      const kin = confirmedFirst(surnameKin(pool(), t, []), t);
       if (kin.length && multiWord && t.split(/\s+/).length <= 4) {
         S.voiceList = kin; S.voiceListQ = t; S.lastCtx = { ...S.lastCtx, timestamp: Date.now() + 10000 }; drawList();
         const sn = t.split(/\s+/).slice(-1)[0];
@@ -1769,12 +1780,13 @@ function renderRoute(B) {
     }
     if (r.guess) {
       const kin = surnameKin(pool(), t, r.results); if (kin.length) r.results = [...r.results, ...kin];
+      r.results = confirmedFirst(r.results, t);
       S.voiceList = r.results; S.voiceListQ = t; S.lastCtx = { ...S.lastCtx, timestamp: Date.now() + 10000 };   // 20s to tap
       drawList();
       const w = t.split(/\s+/); return say(r.results.length === 1 ? `Is it ${callout(r.results[0], nameFor(r.results[0], t), true)}? Tap to confirm` : `Which ${w[w.length - 1]}? ${r.results.length} houses. Tap the house`, t, "list", null, r.results);
     }
     if (r.level === 1 || r.level === 2) {
-      if (r.multi) { const w = t.split(/\s+/); return say(`Multiple ${w[w.length - 1]} matches found`, t, "list", null, r.results); }
+      if (r.multi) { const w = t.split(/\s+/); S.voiceList = confirmedFirst(exactFirst(r.results, t), t); S.voiceListQ = t; drawList(); return say(`Which ${w[w.length - 1]}? ${r.results.length} houses. Tap the house`, t, "list", null, r.results); }
       logLetter(r.stop); flashCard(r.stop.id, `✓ Box ${window.__boxOf?.get(r.stop.sectionId) ?? ""}`);
       return say(callout(r.stop, nameFor(r.stop, t)), t, "found", r.stop, r.results);
     }
@@ -1968,6 +1980,41 @@ function renderRoute(B) {
     if (_snSet.has(k)) return true;
     for (const x of _snSet) if (Math.abs(x.length - k.length) <= 2 && x[0] === k[0] && levenshtein(x, k) <= (k.length >= 7 ? 2 : 1)) return true;
     return false;
+  }
+  /* v51 sticky learning: a NEW mishearing of a name already fixed once goes to the same house.
+     "dervla mccafferty" ≈ learned "dearbhda mccafferty" → Niall McCafferty's house.
+     Never when the words are a real name on the route ("Deirdre McCafferty" lives elsewhere), and never if another
+     house has someone whose first name sounds closer. */
+  function learnedSoundAlike(t, P) {
+    const L = ri.learned; if (!L || !L.size) return null;
+    const w = norm(t).split(/\s+/).filter(Boolean); if (w.length < 2 || w.length > 4) return null;
+    if (ri.index && ri.index.fullNames && ri.index.fullNames.has(ri.normalize(t))) return null;   // a real full name: normal matching handles it
+    const sk = spokenSurname(t), fw = snKey(w[0]); if (!sk || sk.length < 3 || fw.length < 2) return null;
+    const sameSn = x => x === sk || (sk.length >= 5 && x[0] === sk[0] && Math.abs(x.length - sk.length) <= 2 && levenshtein(x, sk) <= (sk.length >= 7 ? 2 : 1));
+    // first-name fit against people in a house with this surname
+    const firstFit = st => Math.max(0, ...splitPipe(st.residents).filter(r => { const x = r.trim().split(/\s+/); return x.length > 1 && sameSn(snKey(x[x.length - 1])); }).map(r => confidence(fw, snKey(r.split(/\s+/)[0]))));
+    // houses already confirmed for this surname: compare with the misheard version AND the real first names there
+    let best = null, bestSc = 0;
+    for (const [phrase, stopId] of L) {
+      if (!stopId) continue;
+      const pw = String(phrase).split(/\s+/).filter(Boolean); if (pw.length < 2) continue;
+      if (!sameSn(spokenSurname(phrase))) continue;
+      const st = P.find(o => o.id === stopId); if (!st) continue;
+      const sc = Math.max(confidence(fw, snKey(pw[0])), firstFit(st));
+      if (sc > bestSc) { bestSc = sc; best = st; }
+    }
+    if (!best || bestSc < 0.7) return null;
+    const stop = best, mine = bestSc;
+    const rival = P.some(st => st.id !== stop.id && firstFit(st) > mine + 0.02);
+    return rival ? null : stop;
+  }
+  // houses the postman has already picked for this surname go to the top of any list
+  function confirmedFirst(list, t) {
+    const L = ri.learned; if (!L || !L.size || !list || list.length < 2) return list;
+    const sk = spokenSurname(t), cnt = new Map();
+    if (sk) for (const [phrase, id] of L) if (id && spokenSurname(phrase) === sk) cnt.set(id, (cnt.get(id) || 0) + 1);
+    if (!cnt.size) return list;
+    return list.map((x, i) => [x, i]).sort((a, b) => (cnt.get(b[0].id) || 0) - (cnt.get(a[0].id) || 0) || a[1] - b[1]).map(x => x[0]);
   }
   function surnameKin(P, q, have) {
     const k = spokenSurname(q); if (!k || k.length < 3) return [];
