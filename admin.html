@@ -906,7 +906,7 @@ async function tabField(body) {
     const g = fieldStats(all), ev = onlyIssues ? all.filter(isIssue) : all, v = g.voiceSearches - 0;
     const tile = (l, val, sub) => `<div class="p-4 bg-card rounded-lg border border-border"><div class="text-sm text-muted-foreground">${l}</div><div class="text-3xl font-bold text-foreground mt-2">${val}</div>${sub ? `<div class="text-xs text-muted-foreground mt-1">${sub}</div>` : ""}</div>`;
     inner.innerHTML = !all.length ? `<div class="${card} text-center text-muted-foreground">No voice searches logged yet. Use the mic in the app — every search appears here within 20 seconds.</div>` : `
-      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-6">
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
         ${tile("Voice searches", g.totalSearches)}${tile("Right first time", pct(g.firstTime, g.totalSearches) + "%", `${g.firstTime} searches`)}
         ${tile("Needed a tap", g.corrected, "postman picked the house")}${tile("No match", g.noMatch, "nothing found")}
         ${tile("Reply time (avg)", avgS(replyAll), replyAll.length ? `iPhone ${avgS(rep.iPhone)} · Android ${avgS(rep.Android)}` : "finished name → reply starts")}${tile("Parcels by voice", g.parcels)}${tile("Mic start (avg)", micStarts.length ? (micStarts.reduce((a, b) => a + b, 0) / micStarts.length / 1000).toFixed(1) + "s" : "—", micStarts.length ? `slowest ${(Math.max(...micStarts) / 1000).toFixed(1)}s · ${micStarts.length} starts` : "time from tap to listening")}
